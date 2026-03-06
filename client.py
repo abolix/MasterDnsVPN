@@ -775,6 +775,9 @@ class MasterDnsVPNClient:
                 self.logger.success(
                     f"<blue>Total valid resolvers after MTU testing: <cyan>{len(self.balancer.valid_servers)}</cyan> of <cyan>{all_resolvers}</cyan></blue>"
                 )
+                self.logger.info(
+                    f"<blue>Note:</blue> Each packet will be sent <yellow>{self.packet_duplication_count}</yellow> times to improve reliability."
+                )
 
                 self.logger.info("=" * 80)
                 self.logger.info(
