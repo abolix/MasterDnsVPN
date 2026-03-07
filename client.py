@@ -10,6 +10,7 @@ import heapq
 import os
 import signal
 import socket
+import struct
 import sys
 import time
 from ctypes import wintypes
@@ -64,7 +65,16 @@ class MasterDnsVPNClient:
         self.min_upload_mtu: int = self.config.get("MIN_UPLOAD_MTU", 0)
         self.min_download_mtu: int = self.config.get("MIN_DOWNLOAD_MTU", 0)
         self.encryption_method: int = self.config.get("DATA_ENCRYPTION_METHOD", 1)
+
+        self.crypto_overhead = 0
+        if self.encryption_method == 2:
+            self.crypto_overhead = 16
+        elif self.encryption_method in (3, 4, 5):
+            self.crypto_overhead = 28
+
         self.success_mtu_checks: bool = False
+        self.max_packed_blocks: int = 1
+        self.max_packets_per_batch: int = self.config.get("MAX_PACKETS_PER_BATCH", 3)
 
         self.resolver_balancing_strategy: int = self.config.get(
             "RESOLVER_BALANCING_STRATEGY", 0
@@ -151,9 +161,9 @@ class MasterDnsVPNClient:
         finally:
             sock.close()
 
-    async def _send_ping_packet(self, payload=None):
+    def _send_ping_packet(self, payload=None):
         """Unified function to queue PING packets with lowest priority (4)."""
-        if self.count_ping >= 3:
+        if self.count_ping >= 20:
             return
 
         if self.session_restart_event and self.session_restart_event.is_set():
@@ -750,6 +760,22 @@ class MasterDnsVPNClient:
                     c["download_mtu_bytes"] for c in valid_conns
                 )
 
+                self.safe_uplink_mtu = max(
+                    64, self.synced_upload_mtu - self.crypto_overhead
+                )
+
+                remaining_mtu_space = (
+                    self.safe_uplink_mtu - 4
+                )  # 4 bytes for os.urandom(4) to avoid DNS caching
+
+                self.max_packed_blocks = max(
+                    1,
+                    min(
+                        remaining_mtu_space // 5,
+                        self.config.get("MAX_PACKETS_PER_BATCH", 10),
+                    ),
+                )  # Each block is 5 bytes (1 byte type + 2 bytes stream ID + 2 bytes seq num)
+
                 max_founded_upload_mtu = max(c["upload_mtu_bytes"] for c in valid_conns)
                 max_founded_download_mtu = max(
                     c["download_mtu_bytes"] for c in valid_conns
@@ -1194,9 +1220,11 @@ class MasterDnsVPNClient:
             is_main = False
             selected_stream_data = None
 
-            active_sids = [
-                sid for sid, s in self.active_streams.items() if s["tx_queue"]
-            ]
+            active_sids = []
+            _append = active_sids.append
+            for sid, s in list(self.active_streams.items()):
+                if s["tx_queue"]:
+                    _append(sid)
 
             if active_sids:
                 num_active = len(active_sids)
@@ -1267,6 +1295,65 @@ class MasterDnsVPNClient:
                         selected_stream_data["track_syn_ack"].discard(q_ptype)
                         if selected_stream_data["count_syn_ack"] > 0:
                             selected_stream_data["count_syn_ack"] -= 1
+
+            if (
+                item
+                and item[2] == Packet_Type.STREAM_DATA_ACK
+                and getattr(self, "max_packed_blocks", 1) > 1
+            ):
+                _pack = struct.pack
+                packed_buffer = bytearray(_pack(">BHH", item[2], item[3], item[4]))
+                blocks = 1
+                max_blocks = self.max_packed_blocks
+
+                mq = getattr(self, "main_queue", [])
+                while self.count_ack > 0 and mq and blocks < max_blocks:
+                    if mq[0][2] == Packet_Type.STREAM_DATA_ACK:
+                        popped = heapq.heappop(mq)
+                        self.track_ack.discard(popped[4])
+                        self.count_ack -= 1
+                        packed_buffer.extend(
+                            _pack(">BHH", popped[2], popped[3], popped[4])
+                        )
+                        blocks += 1
+                    else:
+                        break
+
+                if blocks < max_blocks and active_sids:
+                    start_idx = self.round_robin_index
+                    num_active = len(active_sids)
+
+                    for offset in range(num_active):
+                        if blocks >= max_blocks:
+                            break
+
+                        sid = active_sids[(start_idx + offset) % num_active]
+                        s_data = self.active_streams[sid]
+
+                        if s_data["count_ack"] > 0:
+                            t_q = s_data["tx_queue"]
+                            while (
+                                s_data["count_ack"] > 0 and t_q and blocks < max_blocks
+                            ):
+                                if t_q[0][2] == Packet_Type.STREAM_DATA_ACK:
+                                    popped = heapq.heappop(t_q)
+                                    s_data["track_ack"].discard(popped[4])
+                                    s_data["count_ack"] -= 1
+                                    packed_buffer.extend(
+                                        _pack(">BHH", popped[2], popped[3], popped[4])
+                                    )
+                                    blocks += 1
+                                else:
+                                    break
+
+                item = (
+                    item[0],
+                    item[1],
+                    Packet_Type.PACKED_CONTROL_BLOCKS,
+                    0,
+                    0,
+                    bytes(packed_buffer),
+                )
 
             if not item:
                 continue
@@ -1366,23 +1453,13 @@ class MasterDnsVPNClient:
                 stream_data["status"] = "ACTIVE"
                 reader = stream_data["reader"]
 
-                crypto_overhead = 0
-                if self.encryption_method == 2:
-                    crypto_overhead = 16
-                elif self.encryption_method in (3, 4, 5):
-                    crypto_overhead = 28
-
-                safe_uplink_mtu = max(
-                    64, self.synced_upload_mtu - crypto_overhead - 8 - 16
-                )
-
                 stream = ARQStream(
                     stream_id=stream_id,
                     session_id=self.session_id,
                     enqueue_tx_cb=self._client_enqueue_tx,
                     reader=reader,
                     writer=writer,
-                    mtu=safe_uplink_mtu,
+                    mtu=self.safe_uplink_mtu,
                     logger=self.logger,
                     window_size=self.config.get("ARQ_WINDOW_SIZE", 600),
                     rto=float(self.config.get("ARQ_INITIAL_RTO", 0.8)),
@@ -1395,6 +1472,7 @@ class MasterDnsVPNClient:
                 )
             finally:
                 stream_data.pop("stream_creating", None)
+                self._send_ping_packet()
 
         elif (
             ptype in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND)
@@ -1404,19 +1482,30 @@ class MasterDnsVPNClient:
             stream_obj = self.active_streams[stream_id].get("stream")
             if stream_obj:
                 await stream_obj.receive_data(sn, data)
-
-            await self._send_ping_packet()
-
+            self._send_ping_packet()
         elif ptype == Packet_Type.STREAM_DATA_ACK and stream_id_exists:
             stream_obj = self.active_streams[stream_id].get("stream")
             if stream_obj:
                 await stream_obj.receive_ack(sn)
-
-            await self._send_ping_packet()
-
+            self._send_ping_packet()
         elif ptype == Packet_Type.STREAM_FIN and stream_id_exists:
+            self._send_ping_packet()
+            self.active_streams[stream_id]["fin_retries"] = 99
             await self.close_stream(stream_id, reason="Server sent FIN")
+        elif ptype == Packet_Type.PACKED_CONTROL_BLOCKS and data:
+            for i in range(0, len(data), 5):
+                if i + 5 > len(data):
+                    break
+                b_ptype, b_stream_id, b_sn = struct.unpack(">BHH", data[i : i + 5])
 
+                if (
+                    b_ptype == Packet_Type.STREAM_DATA_ACK
+                    and b_stream_id in self.active_streams
+                ):
+                    stream_obj = self.active_streams[b_stream_id].get("stream")
+                    if stream_obj:
+                        await stream_obj.receive_ack(b_sn)
+            self._send_ping_packet()
         elif ptype == Packet_Type.ERROR_DROP:
             if not self.session_restart_event.is_set():
                 self.logger.error(
@@ -1488,9 +1577,9 @@ class MasterDnsVPNClient:
                     elif status == "TIME_WAIT":
                         if (now - close_time) > 15.0:
                             self.active_streams.pop(sid, None)
-                        elif (now - last_act) > 2.0:
+                        elif (now - last_act) > 5.0 and s.get("fin_retries", 0) < 2:
                             s["last_activity_time"] = now
-                            s.get("track_fin", set()).discard(Packet_Type.STREAM_FIN)
+                            s["fin_retries"] = s.get("fin_retries", 0) + 1
                             fin_data = b"FIN:" + os.urandom(4)
                             await self._client_enqueue_tx(
                                 1, sid, 0, fin_data, is_fin=True

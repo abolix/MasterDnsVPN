@@ -26,6 +26,9 @@ class Packet_Type:
     STREAM_DATA = 0x0E  # Client/Server sends TCP data packet
     STREAM_DATA_ACK = 0x0F  # Server/Client acknowledges TCP data packet fully received
     STREAM_RESEND = 0x10  # Client/Server requests resend of lost packet
+    PACKED_CONTROL_BLOCKS = (
+        0x11  # Client/Server sends multiple control blocks in one DNS response
+    )
     ERROR_DROP = 0xFF  # Invalid/Drop signal
 
 

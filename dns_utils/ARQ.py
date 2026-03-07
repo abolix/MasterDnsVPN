@@ -115,6 +115,7 @@ class ARQStream:
                     "data": raw_data,
                     "time": self.last_activity,
                     "retries": 0,
+                    "current_rto": self.rto,
                 }
 
                 if len(self.snd_buf) >= _limit:
@@ -174,20 +175,24 @@ class ARQStream:
         _write = self.writer.write
         _pop = self.rcv_buf.pop
 
+        data_to_write = []
+
         while self.rcv_nxt in self.rcv_buf:
             try:
-                _write(_pop(self.rcv_nxt))
+                data_to_write.append(_pop(self.rcv_nxt))
                 has_written = True
+                self.rcv_nxt = (self.rcv_nxt + 1) % 65536
             except Exception as e:
-                await self.close(reason=f"Writer Error: {e}")
+                await self.close(reason=f"RCV Buffer Error: {e}")
                 return
-            self.rcv_nxt = (self.rcv_nxt + 1) % 65536
 
         if has_written:
             try:
+                _write(b"".join(data_to_write))
                 await self.writer.drain()
-            except Exception:
-                pass
+            except Exception as e:
+                await self.close(reason=f"Writer Error: {e}")
+                return
 
         await self.enqueue_tx(0, self.stream_id, sn, b"", is_ack=True)
 
@@ -212,12 +217,11 @@ class ARQStream:
         _append = items_to_resend.append
 
         for sn, info in list(self.snd_buf.items()):
-            current_packet_rto = min(self.max_rto, self.rto * (1.5 ** info["retries"]))
-
-            if now - info["time"] >= current_packet_rto:
+            if now - info["time"] >= info["current_rto"]:
                 _append((sn, info["data"]))
                 info["time"] = now
                 info["retries"] += 1
+                info["current_rto"] = min(self.max_rto, info["current_rto"] * 1.5)
 
         _enqueue = self.enqueue_tx
         _sid = self.stream_id

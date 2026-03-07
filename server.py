@@ -10,6 +10,7 @@ import heapq
 import os
 import signal
 import socket
+import struct
 import sys
 import time
 from collections import deque
@@ -96,6 +97,8 @@ class MasterDnsVPNServer:
         self.forward_ip = self.config["FORWARD_IP"]
         self.forward_port = int(self.config["FORWARD_PORT"])
 
+        self.max_packets_per_batch = int(self.config.get("MAX_PACKETS_PER_BATCH", 20))
+
         self.arq_window_size = int(self.config.get("ARQ_WINDOW_SIZE", 300))
         self.session_timeout = int(self.config.get("SESSION_TIMEOUT", 300))
         self.session_cleanup_interval = int(
@@ -147,6 +150,7 @@ class MasterDnsVPNServer:
                 "track_data": set(),
                 "upload_mtu": 512,
                 "download_mtu": 512,
+                "max_packed_blocks": 1,
             }
 
             self.logger.info(
@@ -405,7 +409,27 @@ class MasterDnsVPNServer:
             await self._handle_stream_syn(session_id, stream_id)
 
         elif packet_type == Packet_Type.STREAM_FIN:
+            stream_data = streams.get(stream_id)
+            if stream_data:
+                stream_data["fin_retries"] = 99
             await self.close_stream(session_id, stream_id, reason="Client sent FIN")
+
+        elif packet_type == Packet_Type.PACKED_CONTROL_BLOCKS:
+            extracted_data = self.dns_parser.extract_vpn_data_from_labels(labels)
+            if extracted_data:
+                for i in range(0, len(extracted_data), 5):
+                    if i + 5 > len(extracted_data):
+                        break
+                    b_ptype, b_stream_id, b_sn = struct.unpack(
+                        ">BHH", extracted_data[i : i + 5]
+                    )
+                    if b_ptype == Packet_Type.STREAM_DATA_ACK:
+                        stream_data = streams.get(b_stream_id)
+                        if stream_data and stream_data.get("status") == "CONNECTED":
+                            stream_data["last_activity"] = now_mono
+                            arq = stream_data.get("arq_obj")
+                            if arq:
+                                await arq.receive_ack(b_sn)
 
         res_data = None
         res_stream_id = 0
@@ -493,6 +517,49 @@ class MasterDnsVPNServer:
                 item[5],
             )
 
+            if (
+                res_ptype == Packet_Type.STREAM_DATA_ACK
+                and session.get("max_packed_blocks", 1) > 1
+            ):
+                _pack = struct.pack
+                packed_buffer = bytearray(
+                    _pack(">BHH", res_ptype, res_stream_id, res_sn)
+                )
+                blocks = 1
+                max_blocks = session["max_packed_blocks"]
+
+                if active_streams:
+                    start_idx = session.get("round_robin_index", 0)
+                    num_active = len(active_streams)
+
+                    for offset in range(num_active):
+                        if blocks >= max_blocks:
+                            break
+
+                        idx = (start_idx + offset) % num_active
+                        sid = active_streams[idx]
+                        sdata = streams[sid]
+                        t_queue = sdata["tx_queue"]
+
+                        while (
+                            sdata["count_ack"] > 0 and t_queue and blocks < max_blocks
+                        ):
+                            if t_queue[0][2] == Packet_Type.STREAM_DATA_ACK:
+                                popped = heapq.heappop(t_queue)
+                                sdata["track_ack"].discard(popped[4])
+                                sdata["count_ack"] -= 1
+                                packed_buffer.extend(
+                                    _pack(">BHH", popped[2], popped[3], popped[4])
+                                )
+                                blocks += 1
+                            else:
+                                break
+
+                res_ptype = Packet_Type.PACKED_CONTROL_BLOCKS
+                res_stream_id = 0
+                res_sn = 0
+                res_data = bytes(packed_buffer)
+
         if res_ptype == Packet_Type.PONG:
             res_data = b"PO:" + os.urandom(4)
 
@@ -536,7 +603,7 @@ class MasterDnsVPNServer:
                 break
 
         vpn_response = None
-        if q0.get("qType") == DNS_Record_Type.TXT and packet_domain.count(".") >= 3:
+        if q0.get("qType") == DNS_Record_Type.TXT and packet_domain.count(".") >= 2:
             labels = (
                 packet_domain[: -len("." + packet_main_domain)]
                 if packet_main_domain
@@ -568,7 +635,8 @@ class MasterDnsVPNServer:
                         )
                     except asyncio.CancelledError:
                         raise
-                    except Exception:
+                    except Exception as e:
+                        self.logger.error(f"Error handling VPN packet: {e}")
                         vpn_response = None
 
         if vpn_response:
@@ -651,8 +719,17 @@ class MasterDnsVPNServer:
         safe_upload_mtu = min(upload_mtu, 4096)
         safe_download_mtu = min(download_mtu, 4096)
 
+        safe_downlink_mtu = safe_download_mtu - self.crypto_overhead
         session["upload_mtu"] = safe_upload_mtu - self.crypto_overhead
-        session["download_mtu"] = safe_download_mtu - self.crypto_overhead
+        session["download_mtu"] = safe_downlink_mtu
+
+        remaining_mtu_space = (
+            safe_downlink_mtu - 4
+        )  # 4 bytes for os.urandom(4) to avoid DNS caching
+        session["max_packed_blocks"] = max(
+            1,
+            min(remaining_mtu_space // 5, self.config.get("MAX_PACKETS_PER_BATCH", 20)),
+        )  # Each block is 5 bytes (1 byte type + 2 bytes stream ID + 2 bytes seq num)
 
         self._touch_session(session_id)
 
@@ -959,7 +1036,7 @@ class MasterDnsVPNServer:
                 ),
                 reader=reader,
                 writer=writer,
-                mtu=session.get("download_mtu", 150),
+                mtu=session.get("download_mtu", 50),
                 logger=self.logger,
                 window_size=self.arq_window_size,
                 rto=float(self.config.get("ARQ_INITIAL_RTO", 0.8)),
@@ -1004,10 +1081,12 @@ class MasterDnsVPNServer:
                         if status == "TIME_WAIT":
                             if (now - close_time) > 15.0:
                                 streams.pop(sid, None)
-                            elif (now - last_act) > 2.0:
+                            elif (now - last_act) > 5.0 and stream_data.get(
+                                "fin_retries", 0
+                            ) < 2:
                                 stream_data["last_activity"] = now
-                                stream_data.get("track_fin", set()).discard(
-                                    Packet_Type.STREAM_FIN
+                                stream_data["fin_retries"] = (
+                                    stream_data.get("fin_retries", 0) + 1
                                 )
                                 fin_data = b"FIN:" + os.urandom(4)
                                 await self._server_enqueue_tx(
