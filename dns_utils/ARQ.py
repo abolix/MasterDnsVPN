@@ -524,6 +524,10 @@ class ARQ:
         if diff > self.window_size:
             return
 
+        # Hard cap reordering buffer to prevent unbounded growth under extreme loss.
+        if sn not in self.rcv_buf and len(self.rcv_buf) >= self.window_size:
+            return
+
         if sn not in self.rcv_buf:
             self.rcv_buf[sn] = data
 
@@ -703,7 +707,7 @@ class ARQ:
         for key, info in list(self.control_snd_buf.items()):
             if (
                 info.create_time + self.control_packet_ttl <= now
-                and info.retries >= self.control_max_retries
+                or info.retries >= self.control_max_retries
             ):
                 self.control_snd_buf.pop(key, None)
                 continue
@@ -863,4 +867,6 @@ class ARQ:
         except Exception:
             pass
 
+        self._clear_all_queues()
         self._set_state(Stream_State.CLOSED)
+

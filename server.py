@@ -343,6 +343,26 @@ class MasterDnsVPNServer(PacketQueueMixin):
         except Exception:
             pass
 
+    def _spawn_background_task(self, coro):
+        """Create a tracked background task so shutdown can cancel and release it."""
+        if not self.loop:
+            return None
+
+        task = self.loop.create_task(coro)
+        self._background_tasks.add(task)
+
+        def _on_done(t):
+            self._background_tasks.discard(t)
+            try:
+                t.exception()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+        task.add_done_callback(_on_done)
+        return task
+
     async def _handle_session_init(
         self,
         data=None,
@@ -559,7 +579,9 @@ class MasterDnsVPNServer(PacketQueueMixin):
     ):
         """Handle STREAM_SYN packets without blocking current response."""
         if self.loop:
-            self.loop.create_task(self._handle_stream_syn(session_id, stream_id, sn))
+            self._spawn_background_task(
+                self._handle_stream_syn(session_id, stream_id, sn)
+            )
 
     def _map_socks5_rep_to_packet(self, rep_code: int) -> int:
         """Map SOCKS5 REP code to Packet_Type."""
@@ -686,6 +708,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         )
         if expected_chunk_count <= 0:
             expected_chunk_count = 1
+        expected_chunk_count = min(expected_chunk_count, 64)
 
         if stream_data.get("socks_expected_frags") not in (None, expected_chunk_count):
             # New SOCKS5_SYN series with different fragmentation profile.
@@ -693,7 +716,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         stream_data["socks_expected_frags"] = expected_chunk_count
 
         extracted_data = self.dns_parser.extract_vpn_data_from_labels(labels)
-        if extracted_data:
+        if extracted_data and 0 <= frag_id < expected_chunk_count:
             stream_data["socks_chunks"][frag_id] = extracted_data
 
         await self._enqueue_packet(
@@ -739,7 +762,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         stream_data["status"] = "SOCKS_CONNECTING"
         stream_data.get("socks_chunks", {}).clear()
         if self.loop:
-            self.loop.create_task(
+            self._spawn_background_task(
                 self._process_socks5_target(session_id, stream_id, assembled)
             )
 
@@ -2026,9 +2049,16 @@ class MasterDnsVPNServer(PacketQueueMixin):
         """Signal the server to stop."""
         self.should_stop.set()
 
-        for task in list(self._background_tasks):
+        bg_snapshot = list(self._background_tasks)
+        for task in bg_snapshot:
             if not task.done():
                 task.cancel()
+        if bg_snapshot:
+            try:
+                await asyncio.gather(*bg_snapshot, return_exceptions=True)
+            except Exception:
+                pass
+        self._background_tasks.clear()
 
         for task_name in ["_retransmit_task", "_dns_task", "_session_cleanup_task"]:
             task = getattr(self, task_name, None)
@@ -2165,3 +2195,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
