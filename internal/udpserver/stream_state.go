@@ -18,6 +18,8 @@ type streamStateRecord struct {
 	SessionID      uint8
 	StreamID       uint16
 	State          uint8
+	TargetHost     string
+	TargetPort     uint16
 	CreatedAt      time.Time
 	LastActivityAt time.Time
 	LastSequence   uint16
@@ -57,6 +59,23 @@ func (s *streamStateStore) EnsureOpen(sessionID uint8, streamID uint16, now time
 		LastActivityAt: now,
 	}
 	streams[streamID] = record
+	return cloneStreamStateRecord(record), true
+}
+
+func (s *streamStateStore) BindTarget(sessionID uint8, streamID uint16, host string, port uint16, now time.Time) (*streamStateRecord, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	record := s.lookupLocked(sessionID, streamID)
+	if record == nil {
+		return nil, false
+	}
+	if record.TargetHost != "" && (record.TargetHost != host || record.TargetPort != port) {
+		return nil, false
+	}
+	record.TargetHost = host
+	record.TargetPort = port
+	record.LastActivityAt = now
 	return cloneStreamStateRecord(record), true
 }
 

@@ -25,6 +25,7 @@ import (
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/logger"
 	"masterdnsvpn-go/internal/security"
+	SocksProto "masterdnsvpn-go/internal/socksproto"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
@@ -381,6 +382,8 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 		return s.handleDNSQueryRequest(packet, parsed, decision, vpnPacket)
 	case Enums.PACKET_STREAM_SYN:
 		return s.handleStreamSynRequest(packet, decision, vpnPacket)
+	case Enums.PACKET_SOCKS5_SYN:
+		return s.handleSOCKS5SynRequest(packet, decision, vpnPacket)
 	case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND:
 		return s.handleStreamDataRequest(packet, decision, vpnPacket)
 	case Enums.PACKET_STREAM_FIN:
@@ -690,6 +693,54 @@ func (s *Server) handleStreamSynRequest(questionPacket []byte, decision domainma
 		SequenceNum:    vpnPacket.SequenceNum,
 		FragmentID:     0,
 		TotalFragments: 0,
+	})
+}
+
+func (s *Server) handleSOCKS5SynRequest(questionPacket []byte, decision domainmatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+	if !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 || !vpnPacket.HasSequenceNum {
+		return nil
+	}
+	sessionRecord, ok := s.sessions.Active(vpnPacket.SessionID)
+	if !ok {
+		return nil
+	}
+
+	target, err := SocksProto.ParseTargetPayload(vpnPacket.Payload)
+	if err != nil {
+		packetType := uint8(Enums.PACKET_SOCKS5_CONNECT_FAIL)
+		if errors.Is(err, SocksProto.ErrUnsupportedAddressType) || errors.Is(err, SocksProto.ErrInvalidDomainLength) {
+			packetType = uint8(Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED)
+		}
+		return s.buildSessionVPNResponse(questionPacket, decision.RequestName, sessionRecord, VpnProto.Packet{
+			PacketType:  packetType,
+			StreamID:    vpnPacket.StreamID,
+			SequenceNum: vpnPacket.SequenceNum,
+		})
+	}
+
+	record, ok := s.streams.BindTarget(vpnPacket.SessionID, vpnPacket.StreamID, target.Host, target.Port, time.Now())
+	if !ok || record == nil {
+		return s.buildSessionVPNResponse(questionPacket, decision.RequestName, sessionRecord, VpnProto.Packet{
+			PacketType:  Enums.PACKET_SOCKS5_CONNECT_FAIL,
+			StreamID:    vpnPacket.StreamID,
+			SequenceNum: vpnPacket.SequenceNum,
+		})
+	}
+
+	if s.log != nil {
+		s.log.Debugf(
+			"🧦 <green>SOCKS5 Stream Prepared</green> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Stream</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Target</blue>: <cyan>%s:%d</cyan>",
+			record.SessionID,
+			record.StreamID,
+			record.TargetHost,
+			record.TargetPort,
+		)
+	}
+
+	return s.buildSessionVPNResponse(questionPacket, decision.RequestName, sessionRecord, VpnProto.Packet{
+		PacketType:  Enums.PACKET_SOCKS5_SYN_ACK,
+		StreamID:    vpnPacket.StreamID,
+		SequenceNum: vpnPacket.SequenceNum,
 	})
 }
 

@@ -540,6 +540,80 @@ func TestHandlePacketResetsUnknownStreamData(t *testing.T) {
 	}
 }
 
+func TestHandlePacketRespondsToSocks5Syn(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	srv := New(config.ServerConfig{
+		MaxPacketSize:     65535,
+		Domain:            []string{"a.com"},
+		MinVPNLabelLength: 3,
+	}, nil, codec)
+
+	initPayload := []byte{0, 0x00, 0x00, 0x96, 0x00, 0xC8, 0x10, 0x20, 0x30, 0x40}
+	initResponse := srv.handlePacket(buildTunnelQueryWithSessionID(t, codec, "a.com", 0, Enums.PACKET_SESSION_INIT, initPayload))
+	packet, err := DnsParser.ExtractVPNResponse(initResponse, false)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+	sessionID := packet.Payload[0]
+	sessionCookie := packet.Payload[1]
+
+	_ = srv.handlePacket(buildTunnelStreamQuery(t, codec, "a.com", sessionID, sessionCookie, Enums.PACKET_STREAM_SYN, 15, 1, nil))
+
+	targetPayload := []byte{0x03, 0x0B, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm', 0x01, 0xBB}
+	query := buildTunnelStreamQuery(t, codec, "a.com", sessionID, sessionCookie, Enums.PACKET_SOCKS5_SYN, 15, 2, targetPayload)
+	response := srv.handlePacket(query)
+	vpnResponse, err := DnsParser.ExtractVPNResponse(response, false)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+	if vpnResponse.PacketType != Enums.PACKET_SOCKS5_SYN_ACK {
+		t.Fatalf("unexpected packet type: got=%d want=%d", vpnResponse.PacketType, Enums.PACKET_SOCKS5_SYN_ACK)
+	}
+
+	streamRecord, ok := srv.streams.Lookup(sessionID, 15)
+	if !ok {
+		t.Fatal("expected stream state to exist")
+	}
+	if streamRecord.TargetHost != "example.com" || streamRecord.TargetPort != 443 {
+		t.Fatalf("unexpected bound target: %+v", streamRecord)
+	}
+}
+
+func TestHandlePacketRejectsInvalidSocks5Syn(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	srv := New(config.ServerConfig{
+		MaxPacketSize:     65535,
+		Domain:            []string{"a.com"},
+		MinVPNLabelLength: 3,
+	}, nil, codec)
+
+	initPayload := []byte{0, 0x00, 0x00, 0x96, 0x00, 0xC8, 0x10, 0x20, 0x30, 0x40}
+	initResponse := srv.handlePacket(buildTunnelQueryWithSessionID(t, codec, "a.com", 0, Enums.PACKET_SESSION_INIT, initPayload))
+	packet, err := DnsParser.ExtractVPNResponse(initResponse, false)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+
+	_ = srv.handlePacket(buildTunnelStreamQuery(t, codec, "a.com", packet.Payload[0], packet.Payload[1], Enums.PACKET_STREAM_SYN, 16, 1, nil))
+	query := buildTunnelStreamQuery(t, codec, "a.com", packet.Payload[0], packet.Payload[1], Enums.PACKET_SOCKS5_SYN, 16, 2, []byte{0x09, 0x00, 0x35})
+	response := srv.handlePacket(query)
+	vpnResponse, err := DnsParser.ExtractVPNResponse(response, false)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+	if vpnResponse.PacketType != Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED {
+		t.Fatalf("unexpected packet type: got=%d want=%d", vpnResponse.PacketType, Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED)
+	}
+}
+
 func TestSessionStoreExpiresReuseSignatureWithoutDroppingSession(t *testing.T) {
 	store := newSessionStore()
 	payload := []byte{1, 0x21, 0x00, 0x96, 0x00, 0xC8, 0x44, 0x33, 0x22, 0x11}
