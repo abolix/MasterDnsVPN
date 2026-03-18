@@ -28,7 +28,7 @@ const (
 	maxDNSNameLen       = 253
 	maxDNSLabelLen      = 63
 	maxTXTAnswerPayload = 255
-	maxTXTEncodedChunk  = 160
+	maxTXTEncodedChunk  = 191
 )
 
 func BuildTXTQuestionPacket(name string, qType uint16, ednsUDPSize uint16) ([]byte, error) {
@@ -241,8 +241,7 @@ func buildTXTAnswerChunks(rawFrame []byte, baseEncode bool) ([][]byte, error) {
 		if !baseEncode {
 			return appendLengthPrefixedTXT(raw)
 		}
-		encoded := basecodec.EncodeLowerBase36(raw)
-		return appendLengthPrefixedTXT([]byte(encoded))
+		return appendLengthPrefixedTXT(basecodec.EncodeRawBase64(raw))
 	}
 
 	if len(rawFrame) <= maxChunk {
@@ -360,7 +359,7 @@ func assembleVPNResponse(rawAnswers [][]byte, baseEncoded bool) (vpnproto.Packet
 	if len(rawAnswers) == 1 {
 		raw := rawAnswers[0]
 		if baseEncoded {
-			decoded, err := basecodec.DecodeLowerBase36(raw)
+			decoded, err := basecodec.DecodeRawBase64(raw)
 			if err != nil {
 				return vpnproto.Packet{}, err
 			}
@@ -377,7 +376,7 @@ func assembleVPNResponse(rawAnswers [][]byte, baseEncoded bool) (vpnproto.Packet
 
 	for _, raw := range rawAnswers {
 		if baseEncoded {
-			decoded, err := basecodec.DecodeLowerBase36(raw)
+			decoded, err := basecodec.DecodeRawBase64(raw)
 			if err != nil {
 				return vpnproto.Packet{}, err
 			}

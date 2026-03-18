@@ -35,6 +35,11 @@ type MTUResult struct {
 	DownloadBytes int
 }
 
+type mtuProbeTransport struct {
+	conn   *net.UDPConn
+	buffer []byte
+}
+
 func (c *Client) RunInitialMTUTests() error {
 	if len(c.connections) == 0 {
 		return ErrNoValidConnections
@@ -81,6 +86,7 @@ func (c *Client) RunInitialMTUTests() error {
 	c.successMTUChecks = true
 	c.syncedUploadMTU = minConnectionMTU(c.connections, true)
 	c.syncedDownloadMTU = minConnectionMTU(c.connections, false)
+	c.syncedUploadChars = minConnectionUploadChars(c.connections, c)
 	return nil
 }
 
@@ -89,13 +95,20 @@ func (c *Client) runConnectionMTUTest(conn *Connection, maxUploadPayload int) {
 		return
 	}
 
-	upOK, upBytes, err := c.testUploadMTU(conn, maxUploadPayload)
+	probeTransport, err := c.newMTUProbeTransport(conn)
+	if err != nil {
+		conn.IsValid = false
+		return
+	}
+	defer probeTransport.conn.Close()
+
+	upOK, upBytes, err := c.testUploadMTU(conn, probeTransport, maxUploadPayload)
 	if err != nil || !upOK {
 		conn.IsValid = false
 		return
 	}
 
-	downOK, downBytes, err := c.testDownloadMTU(conn, upBytes)
+	downOK, downBytes, err := c.testDownloadMTU(conn, probeTransport, upBytes)
 	if err != nil || !downOK {
 		conn.IsValid = false
 		return
@@ -116,7 +129,7 @@ func (c *Client) precomputeUploadCaps() map[string]int {
 	return caps
 }
 
-func (c *Client) testUploadMTU(conn *Connection, maxPayload int) (bool, int, error) {
+func (c *Client) testUploadMTU(conn *Connection, probeTransport *mtuProbeTransport, maxPayload int) (bool, int, error) {
 	if maxPayload <= 0 {
 		return false, 0, nil
 	}
@@ -133,7 +146,7 @@ func (c *Client) testUploadMTU(conn *Connection, maxPayload int) (bool, int, err
 		c.cfg.MinUploadMTU,
 		maxPayload,
 		func(candidate int) (bool, error) {
-			return c.sendUploadMTUProbe(conn, candidate)
+			return c.sendUploadMTUProbe(conn, probeTransport, candidate)
 		},
 	)
 	if best < max(defaultMTUMinFloor, c.cfg.MinUploadMTU) {
@@ -142,12 +155,12 @@ func (c *Client) testUploadMTU(conn *Connection, maxPayload int) (bool, int, err
 	return true, best, nil
 }
 
-func (c *Client) testDownloadMTU(conn *Connection, uploadMTU int) (bool, int, error) {
+func (c *Client) testDownloadMTU(conn *Connection, probeTransport *mtuProbeTransport, uploadMTU int) (bool, int, error) {
 	best := c.binarySearchMTU(
 		c.cfg.MinDownloadMTU,
 		c.cfg.MaxDownloadMTU,
 		func(candidate int) (bool, error) {
-			return c.sendDownloadMTUProbe(conn, candidate, uploadMTU)
+			return c.sendDownloadMTUProbe(conn, probeTransport, candidate, uploadMTU)
 		},
 	)
 	if best < max(defaultMTUMinFloor, c.cfg.MinDownloadMTU) {
@@ -210,7 +223,7 @@ func (c *Client) binarySearchMTU(minValue, maxValue int, testFn func(int) (bool,
 	return best
 }
 
-func (c *Client) sendUploadMTUProbe(conn *Connection, mtuSize int) (bool, error) {
+func (c *Client) sendUploadMTUProbe(conn *Connection, probeTransport *mtuProbeTransport, mtuSize int) (bool, error) {
 	if mtuSize < 1 {
 		return false, nil
 	}
@@ -230,7 +243,7 @@ func (c *Client) sendUploadMTUProbe(conn *Connection, mtuSize int) (bool, error)
 		return false, nil
 	}
 
-	response, err := c.sendDNSQuery(conn, query)
+	response, err := c.sendDNSQuery(probeTransport, query)
 	if err != nil {
 		return false, nil
 	}
@@ -245,7 +258,7 @@ func (c *Client) sendUploadMTUProbe(conn *Connection, mtuSize int) (bool, error)
 	return bytes.Equal(packet.Payload, key), nil
 }
 
-func (c *Client) sendDownloadMTUProbe(conn *Connection, mtuSize int, uploadMTU int) (bool, error) {
+func (c *Client) sendDownloadMTUProbe(conn *Connection, probeTransport *mtuProbeTransport, mtuSize int, uploadMTU int) (bool, error) {
 	if mtuSize < defaultMTUMinFloor {
 		return false, nil
 	}
@@ -267,7 +280,7 @@ func (c *Client) sendDownloadMTUProbe(conn *Connection, mtuSize int, uploadMTU i
 		return false, nil
 	}
 
-	response, err := c.sendDNSQuery(conn, query)
+	response, err := c.sendDNSQuery(probeTransport, query)
 	if err != nil {
 		return false, nil
 	}
@@ -309,7 +322,7 @@ func (c *Client) buildMTUProbeQuery(domain string, packetType uint8, payload []b
 	return dnsparser.BuildTXTQuestionPacket(name, enums.DNSRecordTypeTXT, ednsSafeUDPSize)
 }
 
-func (c *Client) sendDNSQuery(conn *Connection, packet []byte) ([]byte, error) {
+func (c *Client) newMTUProbeTransport(conn *Connection) (*mtuProbeTransport, error) {
 	addr, err := net.ResolveUDPAddr("udp", conn.ResolverLabel)
 	if err != nil {
 		return nil, err
@@ -319,25 +332,32 @@ func (c *Client) sendDNSQuery(conn *Connection, packet []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer udpConn.Close()
+	return &mtuProbeTransport{
+		conn:   udpConn,
+		buffer: make([]byte, ednsSafeUDPSize),
+	}, nil
+}
 
+func (c *Client) sendDNSQuery(probeTransport *mtuProbeTransport, packet []byte) ([]byte, error) {
+	if probeTransport == nil || probeTransport.conn == nil {
+		return nil, net.ErrClosed
+	}
 	timeout := time.Duration(c.cfg.MTUTestTimeout * float64(time.Second))
 	if timeout <= 0 {
 		timeout = time.Second
 	}
-	if err := udpConn.SetDeadline(time.Now().Add(timeout)); err != nil {
+	if err := probeTransport.conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, err
 	}
-	if _, err := udpConn.Write(packet); err != nil {
+	if _, err := probeTransport.conn.Write(packet); err != nil {
 		return nil, err
 	}
 
-	buffer := make([]byte, ednsSafeUDPSize)
-	n, err := udpConn.Read(buffer)
+	n, err := probeTransport.conn.Read(probeTransport.buffer)
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte(nil), buffer[:n]...), nil
+	return append([]byte(nil), probeTransport.buffer[:n]...), nil
 }
 
 func (c *Client) maxUploadMTUPayload(domain string) int {
@@ -414,6 +434,48 @@ func minConnectionMTU(connections []Connection, upload bool) int {
 		}
 	}
 	return best
+}
+
+func minConnectionUploadChars(connections []Connection, c *Client) int {
+	best := 0
+	for _, conn := range connections {
+		if !conn.IsValid || conn.UploadMTUBytes <= 0 {
+			continue
+		}
+		value := c.encodedCharsForPayload(conn.UploadMTUBytes)
+		if value <= 0 {
+			continue
+		}
+		if best == 0 || value < best {
+			best = value
+		}
+	}
+	return best
+}
+
+func (c *Client) encodedCharsForPayload(payloadLen int) int {
+	if payloadLen <= 0 {
+		return 0
+	}
+	payload := make([]byte, payloadLen)
+	for i := range payload {
+		payload[i] = 0xAB
+	}
+	encoded, err := vpnproto.BuildEncoded(vpnproto.BuildOptions{
+		SessionID:       255,
+		PacketType:      enums.PacketStreamData,
+		SessionCookie:   255,
+		StreamID:        0xFFFF,
+		SequenceNum:     0xFFFF,
+		FragmentID:      0xFF,
+		TotalFragments:  0xFF,
+		CompressionType: 0xFF,
+		Payload:         payload,
+	}, c.codec)
+	if err != nil {
+		return 0
+	}
+	return len(encoded)
 }
 
 func max(a, b int) int {

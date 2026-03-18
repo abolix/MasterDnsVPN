@@ -32,6 +32,7 @@ type Client struct {
 	enqueueSeq        uint64
 	syncedUploadMTU   int
 	syncedDownloadMTU int
+	syncedUploadChars int
 }
 
 type Connection struct {
@@ -102,6 +103,10 @@ func (c *Client) SyncedDownloadMTU() int {
 	return c.syncedDownloadMTU
 }
 
+func (c *Client) SyncedUploadChars() int {
+	return c.syncedUploadChars
+}
+
 func (c *Client) ResetRuntimeState(resetSessionCookie bool) {
 	c.enqueueSeq = 0
 	c.sessionID = 0
@@ -159,7 +164,16 @@ func (c *Client) GetConnectionByKey(serverKey string) (Connection, bool) {
 }
 
 func (c *Client) SetConnectionValidity(serverKey string, valid bool) bool {
-	return c.balancer.SetConnectionValidity(strings.TrimSpace(serverKey), valid)
+	key := strings.TrimSpace(serverKey)
+	idx, ok := c.connectionsByKey[key]
+	if !ok || idx < 0 || idx >= len(c.connections) {
+		return false
+	}
+	if !c.balancer.SetConnectionValidity(key, valid) {
+		return false
+	}
+	c.connections[idx].IsValid = valid
+	return true
 }
 
 func (c *Client) GetBestConnection() (Connection, bool) {

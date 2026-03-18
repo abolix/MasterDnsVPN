@@ -67,3 +67,36 @@ func TestResetRuntimeState(t *testing.T) {
 		t.Fatalf("reset with cookie reset should clear session cookie: got=%d", c.sessionCookie)
 	}
 }
+
+func TestSetConnectionValidityKeepsClientAndBalancerInSync(t *testing.T) {
+	cfg := config.ClientConfig{
+		Domains: []string{"a.example.com"},
+		Resolvers: []config.ResolverAddress{
+			{IP: "8.8.8.8", Port: 53},
+		},
+	}
+
+	c := New(cfg, nil, nil)
+	c.BuildConnectionMap()
+	key := c.Connections()[0].Key
+
+	if !c.SetConnectionValidity(key, false) {
+		t.Fatal("SetConnectionValidity returned false")
+	}
+	if c.Connections()[0].IsValid {
+		t.Fatal("client connection validity was not updated")
+	}
+	if got := c.Balancer().ValidCount(); got != 0 {
+		t.Fatalf("unexpected valid count after disable: got=%d want=0", got)
+	}
+
+	if !c.SetConnectionValidity(key, true) {
+		t.Fatal("SetConnectionValidity returned false when re-enabling")
+	}
+	if !c.Connections()[0].IsValid {
+		t.Fatal("client connection validity was not restored")
+	}
+	if got := c.Balancer().ValidCount(); got != 1 {
+		t.Fatalf("unexpected valid count after enable: got=%d want=1", got)
+	}
+}

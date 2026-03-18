@@ -83,6 +83,63 @@ func TestBuildAndExtractVPNResponsePacketChunked(t *testing.T) {
 	}
 }
 
+func TestBuildAndExtractVPNResponsePacketSingleAnswerBaseEncoded(t *testing.T) {
+	query, err := BuildTXTQuestionPacket("x.v.example.com", enums.DNSRecordTypeTXT, 4096)
+	if err != nil {
+		t.Fatalf("BuildTXTQuestionPacket returned error: %v", err)
+	}
+
+	response, err := BuildVPNResponsePacket(query, "x.v.example.com", vpnproto.Packet{
+		SessionID:  9,
+		PacketType: enums.PacketMTUUpRes,
+		Payload:    []byte("challenge"),
+	}, true)
+	if err != nil {
+		t.Fatalf("BuildVPNResponsePacket returned error: %v", err)
+	}
+
+	packet, err := ExtractVPNResponse(response, true)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+	if packet.PacketType != enums.PacketMTUUpRes {
+		t.Fatalf("unexpected packet type: got=%d want=%d", packet.PacketType, enums.PacketMTUUpRes)
+	}
+	if !bytes.Equal(packet.Payload, []byte("challenge")) {
+		t.Fatalf("unexpected payload: got=%q", packet.Payload)
+	}
+}
+
+func TestBuildAndExtractVPNResponsePacketChunkedBaseEncoded(t *testing.T) {
+	query, err := BuildTXTQuestionPacket("x.v.example.com", enums.DNSRecordTypeTXT, 4096)
+	if err != nil {
+		t.Fatalf("BuildTXTQuestionPacket returned error: %v", err)
+	}
+
+	payload := bytes.Repeat([]byte{0xAB}, 700)
+	response, err := BuildVPNResponsePacket(query, "x.v.example.com", vpnproto.Packet{
+		SessionID:   7,
+		PacketType:  enums.PacketMTUDownRes,
+		StreamID:    1,
+		SequenceNum: 2,
+		Payload:     payload,
+	}, true)
+	if err != nil {
+		t.Fatalf("BuildVPNResponsePacket returned error: %v", err)
+	}
+
+	packet, err := ExtractVPNResponse(response, true)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+	if packet.PacketType != enums.PacketMTUDownRes {
+		t.Fatalf("unexpected packet type: got=%d want=%d", packet.PacketType, enums.PacketMTUDownRes)
+	}
+	if !bytes.Equal(packet.Payload, payload) {
+		t.Fatalf("unexpected chunked payload size: got=%d want=%d", len(packet.Payload), len(payload))
+	}
+}
+
 func TestExtractVPNResponseReordersChunkedAnswers(t *testing.T) {
 	query, err := BuildTXTQuestionPacket("x.v.example.com", enums.DNSRecordTypeTXT, 4096)
 	if err != nil {
