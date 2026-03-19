@@ -1060,6 +1060,88 @@ func TestHandleInboundStreamPacketIgnoresDuplicateData(t *testing.T) {
 	c.deleteStream(stream.ID)
 }
 
+func TestClientStreamTXLoopAdvancesQueueOnDataAck(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	c := New(config.ClientConfig{
+		LocalDNSPendingTimeoutSec: 1,
+	}, nil, codec)
+	c.connections = []Connection{{
+		Domain:        "v.example.com",
+		Resolver:      "127.0.0.1",
+		ResolverPort:  5353,
+		ResolverLabel: "127.0.0.1:5353",
+		Key:           "127.0.0.1|5353|v.example.com",
+		IsValid:       true,
+	}}
+	c.connectionsByKey = map[string]int{c.connections[0].Key: 0}
+	c.rebuildBalancer()
+	c.sessionID = 7
+	c.sessionCookie = 9
+	c.sessionReady = true
+	c.responseMode = mtuProbeRawResponse
+
+	callSeq := make(chan uint16, 4)
+	c.exchangeQueryFn = func(conn Connection, packet []byte, timeout time.Duration) ([]byte, error) {
+		queryPacket, err := DnsParser.ParsePacketLite(packet)
+		if err != nil || !queryPacket.HasQuestion {
+			t.Fatalf("unexpected tunnel query: err=%v", err)
+		}
+		vpnPacket, err := VpnProto.ParseFromLabels(extractTestTunnelLabels(queryPacket.FirstQuestion.Name, "v.example.com"), c.codec)
+		if err != nil {
+			t.Fatalf("ParseFromLabels returned error: %v", err)
+		}
+		callSeq <- vpnPacket.SequenceNum
+		return DnsParser.BuildVPNResponsePacket(packet, queryPacket.FirstQuestion.Name, VpnProto.Packet{
+			SessionID:      c.sessionID,
+			SessionCookie:  c.sessionCookie,
+			PacketType:     Enums.PACKET_STREAM_DATA_ACK,
+			StreamID:       vpnPacket.StreamID,
+			SequenceNum:    vpnPacket.SequenceNum,
+			FragmentID:     0,
+			TotalFragments: 1,
+		}, false)
+	}
+
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+	stream := c.createStream(17, serverConn)
+	defer c.deleteStream(stream.ID)
+
+	if err := c.queueStreamPacket(stream, Enums.PACKET_STREAM_DATA, []byte("one")); err != nil {
+		t.Fatalf("queueStreamPacket returned error: %v", err)
+	}
+	if err := c.queueStreamPacket(stream, Enums.PACKET_STREAM_DATA, []byte("two")); err != nil {
+		t.Fatalf("queueStreamPacket returned error: %v", err)
+	}
+
+	timeout := time.After(2 * time.Second)
+	seen := make([]uint16, 0, 2)
+	for len(seen) < 2 {
+		select {
+		case seq := <-callSeq:
+			seen = append(seen, seq)
+		case <-timeout:
+			t.Fatalf("timed out waiting for queued packets, seen=%v", seen)
+		}
+	}
+	if seen[0] == seen[1] {
+		t.Fatalf("expected different sequence numbers for queued packets: %v", seen)
+	}
+
+	stream.mu.Lock()
+	queueLen := len(stream.TXQueue)
+	pendingNil := stream.TXPending == nil
+	stream.mu.Unlock()
+	if queueLen != 0 || !pendingNil {
+		t.Fatalf("expected queue to drain after acks, queueLen=%d pendingNil=%t", queueLen, pendingNil)
+	}
+}
+
 func TestDispatchDNSQueryFailsWithoutValidConnections(t *testing.T) {
 	codec, err := security.NewCodec(0, "")
 	if err != nil {

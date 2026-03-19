@@ -18,6 +18,8 @@ import (
 )
 
 const maxClientStreamFollowUps = 16
+const streamTXInitialRetryDelay = 350 * time.Millisecond
+const streamTXMaxRetryDelay = 2 * time.Second
 
 var ErrClientStreamClosed = errors.New("client stream closed")
 
@@ -27,11 +29,15 @@ func (c *Client) createStream(streamID uint16, conn net.Conn) *clientStream {
 		Conn:           conn,
 		NextSequence:   2,
 		LastActivityAt: time.Now(),
+		TXQueue:        make([]clientStreamTXPacket, 0, 8),
+		TXWake:         make(chan struct{}, 1),
+		StopCh:         make(chan struct{}),
 	}
 	c.storeStream(stream)
 	if c.stream0Runtime != nil {
 		c.stream0Runtime.NotifyDNSActivity()
 	}
+	go c.runClientStreamTXLoop(stream, 5*time.Second)
 	return stream
 }
 
@@ -191,13 +197,169 @@ func (c *Client) handleInboundStreamPacket(packet VpnProto.Packet, timeout time.
 	}
 }
 
+func (c *Client) queueStreamPacket(stream *clientStream, packetType uint8, payload []byte) error {
+	if c == nil || stream == nil {
+		return ErrClientStreamClosed
+	}
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if stream.Closed {
+		return ErrClientStreamClosed
+	}
+	if packetType == Enums.PACKET_STREAM_FIN && stream.LocalFinSent {
+		return nil
+	}
+	if packetType == Enums.PACKET_STREAM_RST && stream.ResetSent {
+		return nil
+	}
+
+	stream.NextSequence++
+	if stream.NextSequence == 0 {
+		stream.NextSequence = 1
+	}
+	sequenceNum := stream.NextSequence
+	stream.LastActivityAt = time.Now()
+	if packetType == Enums.PACKET_STREAM_FIN {
+		stream.LocalFinSent = true
+	}
+	if packetType == Enums.PACKET_STREAM_RST {
+		stream.ResetSent = true
+	}
+	stream.TXQueue = append(stream.TXQueue, clientStreamTXPacket{
+		PacketType:  packetType,
+		SequenceNum: sequenceNum,
+		Payload:     append([]byte(nil), payload...),
+		RetryDelay:  streamTXInitialRetryDelay,
+	})
+	notifyStreamWake(stream)
+	return nil
+}
+
+func (c *Client) runClientStreamTXLoop(stream *clientStream, timeout time.Duration) {
+	if c == nil || stream == nil {
+		return
+	}
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+
+	for {
+		packet, waitFor, shouldStop := nextClientStreamTX(stream)
+		if shouldStop {
+			return
+		}
+		if packet == nil {
+			select {
+			case <-stream.TXWake:
+				continue
+			case <-stream.StopCh:
+				return
+			}
+		}
+		if waitFor > 0 {
+			timer := time.NewTimer(waitFor)
+			select {
+			case <-timer.C:
+			case <-stream.TXWake:
+				timer.Stop()
+				continue
+			case <-stream.StopCh:
+				timer.Stop()
+				return
+			}
+		}
+
+		response, err := c.exchangeStreamControlPacket(packet.PacketType, stream.ID, packet.SequenceNum, packet.Payload, timeout)
+		if err != nil {
+			rescheduleClientStreamTX(stream)
+			continue
+		}
+		if err := c.handleFollowUpServerPacket(response, timeout); err != nil {
+			rescheduleClientStreamTX(stream)
+			continue
+		}
+		ackClientStreamTX(stream, packet.SequenceNum)
+		if streamFinished(stream) {
+			c.deleteStream(stream.ID)
+			return
+		}
+	}
+}
+
+func nextClientStreamTX(stream *clientStream) (*clientStreamTXPacket, time.Duration, bool) {
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if stream.Closed {
+		return nil, 0, true
+	}
+	if stream.TXPending == nil && len(stream.TXQueue) != 0 {
+		packet := stream.TXQueue[0]
+		stream.TXQueue[0] = clientStreamTXPacket{}
+		stream.TXQueue = stream.TXQueue[1:]
+		packet.RetryAt = time.Now()
+		stream.TXPending = &packet
+	}
+	if stream.TXPending == nil {
+		return nil, 0, false
+	}
+	waitFor := time.Until(stream.TXPending.RetryAt)
+	if waitFor < 0 {
+		waitFor = 0
+	}
+	packet := *stream.TXPending
+	return &packet, waitFor, false
+}
+
+func rescheduleClientStreamTX(stream *clientStream) {
+	if stream == nil {
+		return
+	}
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if stream.TXPending == nil {
+		return
+	}
+	delay := stream.TXPending.RetryDelay
+	if delay <= 0 {
+		delay = streamTXInitialRetryDelay
+	}
+	stream.TXPending.RetryAt = time.Now().Add(delay)
+	delay *= 2
+	if delay > streamTXMaxRetryDelay {
+		delay = streamTXMaxRetryDelay
+	}
+	stream.TXPending.RetryDelay = delay
+}
+
+func ackClientStreamTX(stream *clientStream, sequenceNum uint16) {
+	if stream == nil {
+		return
+	}
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if stream.TXPending == nil || stream.TXPending.SequenceNum != sequenceNum {
+		return
+	}
+	stream.TXPending = nil
+}
+
+func notifyStreamWake(stream *clientStream) {
+	if stream == nil {
+		return
+	}
+	select {
+	case stream.TXWake <- struct{}{}:
+	default:
+	}
+}
+
 func (c *Client) runLocalStreamReadLoop(stream *clientStream, timeout time.Duration) {
 	defer func() {
 		stream.mu.Lock()
 		closed := stream.Closed
 		stream.mu.Unlock()
 		if !closed {
-			_ = c.sendStreamFIN(stream, timeout)
+			_ = c.queueStreamPacket(stream, Enums.PACKET_STREAM_FIN, nil)
 		}
 		if streamFinished(stream) {
 			c.deleteStream(stream.ID)
@@ -212,8 +374,8 @@ func (c *Client) runLocalStreamReadLoop(stream *clientStream, timeout time.Durat
 	for {
 		n, err := stream.Conn.Read(buffer)
 		if n > 0 {
-			if sendErr := c.sendStreamData(stream, append([]byte(nil), buffer[:n]...), timeout); sendErr != nil {
-				_ = c.sendStreamRST(stream, timeout)
+			if sendErr := c.queueStreamPacket(stream, Enums.PACKET_STREAM_DATA, buffer[:n]); sendErr != nil {
+				_ = c.queueStreamPacket(stream, Enums.PACKET_STREAM_RST, nil)
 				return
 			}
 		}
@@ -223,7 +385,7 @@ func (c *Client) runLocalStreamReadLoop(stream *clientStream, timeout time.Durat
 		if errors.Is(err, io.EOF) {
 			return
 		}
-		_ = c.sendStreamRST(stream, timeout)
+		_ = c.queueStreamPacket(stream, Enums.PACKET_STREAM_RST, nil)
 		return
 	}
 }

@@ -82,6 +82,19 @@ type clientStream struct {
 	InboundDataSet bool
 	RemoteFinSeq   uint16
 	RemoteFinSet   bool
+	TXQueue        []clientStreamTXPacket
+	TXPending      *clientStreamTXPacket
+	TXWake         chan struct{}
+	StopCh         chan struct{}
+	stopOnce       sync.Once
+}
+
+type clientStreamTXPacket struct {
+	PacketType  uint8
+	SequenceNum uint16
+	Payload     []byte
+	RetryDelay  time.Duration
+	RetryAt     time.Time
 }
 
 func Bootstrap(configPath string) (*Client, error) {
@@ -372,6 +385,9 @@ func (c *Client) deleteStream(streamID uint16) {
 	delete(c.streams, streamID)
 	c.streamsMu.Unlock()
 	if stream != nil && stream.Conn != nil {
+		stream.stopOnce.Do(func() {
+			close(stream.StopCh)
+		})
 		_ = stream.Conn.Close()
 	}
 }
