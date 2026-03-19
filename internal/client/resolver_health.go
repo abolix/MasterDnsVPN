@@ -297,7 +297,7 @@ func (c *Client) reactivateResolverConnection(serverKey string) bool {
 	c.balancer.ResetServerStats(serverKey)
 	if c.log != nil {
 		c.log.Infof(
-			"♻️ <green>Resolver Re-enabled</green> <magenta>|</magenta> <blue>Resolver</blue>: <cyan>%s</cyan>",
+			"\U0001F504 <green>Resolver Re-enabled</green> <magenta>|</magenta> <blue>Resolver</blue>: <cyan>%s</cyan>",
 			conn.ResolverLabel,
 		)
 	}

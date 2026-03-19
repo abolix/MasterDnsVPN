@@ -383,7 +383,7 @@ func (r *stream0Runtime) processDequeue(packet arq.QueuedPacket) {
 		r.noteServerDataActivity()
 		if err := r.client.handleInboundDNSResponseFragment(response); err != nil && r.client.log != nil {
 			r.client.log.Debugf(
-				"🧩 <yellow>DNS Response Fragment Handling Failed</yellow> <magenta>|</magenta> <cyan>%v</cyan>",
+				"\U0001F9E9 <yellow>DNS Response Fragment Handling Failed</yellow> <magenta>|</magenta> <cyan>%v</cyan>",
 				err,
 			)
 		}

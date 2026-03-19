@@ -14,11 +14,11 @@ import (
 )
 
 func TestPackedControlBlockLimitUsesMtuAndCap(t *testing.T) {
-	if got := ComputeClientPackedControlBlockLimit(200, 99); got != 20 {
-		t.Fatalf("unexpected client pack limit: got=%d want=20", got)
+	if got := ComputeClientPackedControlBlockLimit(200, 99); got != 14 {
+		t.Fatalf("unexpected client pack limit: got=%d want=14", got)
 	}
-	if got := ComputeServerPackedControlBlockLimit(200, 99); got != 32 {
-		t.Fatalf("unexpected server pack limit: got=%d want=32", got)
+	if got := ComputeServerPackedControlBlockLimit(200, 99); got != 22 {
+		t.Fatalf("unexpected server pack limit: got=%d want=22", got)
 	}
 	if got := ComputeClientPackedControlBlockLimit(10, 99); got != 1 {
 		t.Fatalf("small mtu should clamp to 1, got=%d", got)
@@ -163,6 +163,45 @@ func TestSchedulerPacksSamePriorityControlBlocksAcrossStreams(t *testing.T) {
 	last, ok := scheduler.Dequeue()
 	if !ok || last.Packet.PacketType != Enums.PACKET_SOCKS5_CONNECT_FAIL || last.Packet.StreamID != 2 {
 		t.Fatalf("expected remaining owner-local control packet last, got=%+v ok=%v", last.Packet, ok)
+	}
+}
+
+func TestSchedulerPacksDNSAckControlBlocks(t *testing.T) {
+	scheduler := NewScheduler(4)
+	packets := []QueuedPacket{
+		{PacketType: Enums.PACKET_DNS_QUERY_REQ_ACK, StreamID: 0, SequenceNum: 10, FragmentID: 0, TotalFragments: 2},
+		{PacketType: Enums.PACKET_DNS_QUERY_REQ_ACK, StreamID: 0, SequenceNum: 10, FragmentID: 1, TotalFragments: 2},
+	}
+	for _, packet := range packets {
+		if !scheduler.Enqueue(QueueTargetMain, packet) {
+			t.Fatalf("failed to enqueue packet: %+v", packet)
+		}
+	}
+
+	result, ok := scheduler.Dequeue()
+	if !ok {
+		t.Fatal("expected dequeue result")
+	}
+	if result.Packet.PacketType != Enums.PACKET_PACKED_CONTROL_BLOCKS {
+		t.Fatalf("expected packed control blocks, got packet type=%d", result.Packet.PacketType)
+	}
+	if result.PackedBlocks != 2 {
+		t.Fatalf("unexpected packed block count: got=%d want=2", result.PackedBlocks)
+	}
+
+	var fragments []uint8
+	ForEachPackedControlBlock(result.Packet.Payload, func(packetType uint8, streamID uint16, sequenceNum uint16, fragmentID uint8, totalFragments uint8) bool {
+		if packetType != Enums.PACKET_DNS_QUERY_REQ_ACK {
+			t.Fatalf("unexpected packed packet type: got=%d want=%d", packetType, Enums.PACKET_DNS_QUERY_REQ_ACK)
+		}
+		if streamID != 0 || sequenceNum != 10 || totalFragments != 2 {
+			t.Fatalf("unexpected packed dns ack metadata: stream=%d seq=%d total=%d", streamID, sequenceNum, totalFragments)
+		}
+		fragments = append(fragments, fragmentID)
+		return true
+	})
+	if len(fragments) != 2 || fragments[0] != 0 || fragments[1] != 1 {
+		t.Fatalf("unexpected packed dns ack fragments: %v", fragments)
 	}
 }
 

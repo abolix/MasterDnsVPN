@@ -50,12 +50,12 @@ func (c *Client) loadLocalDNSCache() {
 	loaded, err := c.localDNSCache.LoadFromFile(c.cfg.LocalDNSCachePath(), c.now())
 	if err != nil {
 		if c.log != nil {
-			c.log.Warnf("💾 <cyan>Local DNS Cache</cyan> <magenta>|</magenta> <red>Load Failed</red> <magenta>|</magenta> <yellow>%v</yellow>", err)
+			c.log.Warnf("\U0001F4BE <cyan>Local DNS Cache</cyan> <magenta>|</magenta> <red>Load Failed</red> <magenta>|</magenta> <yellow>%v</yellow>", err)
 		}
 		return
 	}
 	if loaded > 0 && c.log != nil {
-		c.log.Infof("💾 <cyan>Local DNS Cache</cyan> <magenta>|</magenta> <green>Loaded</green>: <magenta>%d</magenta>", loaded)
+		c.log.Infof("\U0001F4BE <cyan>Local DNS Cache</cyan> <magenta>|</magenta> <green>Loaded</green>: <magenta>%d</magenta>", loaded)
 	}
 }
 
@@ -67,12 +67,12 @@ func (c *Client) flushLocalDNSCache() {
 	saved, err := c.localDNSCache.SaveToFile(c.cfg.LocalDNSCachePath(), c.now())
 	if err != nil {
 		if c.log != nil {
-			c.log.Warnf("💾 <cyan>Local DNS Cache</cyan> <magenta>|</magenta> <red>Flush Failed</red> <magenta>|</magenta> <yellow>%v</yellow>", err)
+			c.log.Warnf("\U0001F4BE <cyan>Local DNS Cache</cyan> <magenta>|</magenta> <red>Flush Failed</red> <magenta>|</magenta> <yellow>%v</yellow>", err)
 		}
 		return
 	}
 	if saved > 0 && c.log != nil {
-		c.log.Debugf("💾 <cyan>Local DNS Cache</cyan> <magenta>|</magenta> <green>Flushed</green>: <magenta>%d</magenta>", saved)
+		c.log.Debugf("\U0001F4BE <cyan>Local DNS Cache</cyan> <magenta>|</magenta> <green>Flushed</green>: <magenta>%d</magenta>", saved)
 	}
 }
 

@@ -42,7 +42,7 @@ func (c *Client) queueDNSDispatch(request *dnsDispatchRequest) {
 	}
 	if err := c.stream0Runtime.QueueDNSRequest(request.Query); err != nil && c.log != nil {
 		c.log.Debugf(
-			"🧩 <yellow>Local DNS Queue Failed</yellow> <magenta>|</magenta> <blue>Domain</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Type</blue>: <yellow>%s</yellow> <magenta>|</magenta> <cyan>%v</cyan>",
+			"\U0001F9E9 <yellow>Local DNS Queue Failed</yellow> <magenta>|</magenta> <blue>Domain</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Type</blue>: <yellow>%s</yellow> <magenta>|</magenta> <cyan>%v</cyan>",
 			request.Domain,
 			Enums.DNSRecordTypeName(request.QType),
 			err,

@@ -161,7 +161,7 @@ func (c *Client) handlePackedServerControlBlocks(payload []byte, timeout time.Du
 		return nil
 	}
 	var firstErr error
-	arq.ForEachPackedControlBlock(payload, func(packetType uint8, streamID uint16, sequenceNum uint16) bool {
+	arq.ForEachPackedControlBlock(payload, func(packetType uint8, streamID uint16, sequenceNum uint16, fragmentID uint8, totalFragments uint8) bool {
 		if packetType == Enums.PACKET_PACKED_CONTROL_BLOCKS {
 			return true
 		}
@@ -179,6 +179,8 @@ func (c *Client) handlePackedServerControlBlocks(payload []byte, timeout time.Du
 			HasStreamID:    streamID != 0,
 			SequenceNum:    sequenceNum,
 			HasSequenceNum: sequenceNum != 0,
+			FragmentID:     fragmentID,
+			TotalFragments: totalFragments,
 		}
 		if err := c.handleFollowUpServerPacket(packet, timeout); err != nil && firstErr == nil {
 			firstErr = err

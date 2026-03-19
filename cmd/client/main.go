@@ -27,48 +27,48 @@ func main() {
 
 	cfg := app.Config()
 	log := app.Logger()
-	log.Infof("🚀 <green>Client Configuration Loaded</green>")
+	log.Infof("\U0001F680 <green>Client Configuration Loaded</green>")
 	log.Infof(
-		"🧭 <green>Client Mode</green> <magenta>|</magenta> <blue>Protocol</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Encryption</blue>: <magenta>%d</magenta>",
+		"\U0001F680 <green>Client Mode</green> <magenta>|</magenta> <blue>Protocol</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Encryption</blue>: <magenta>%d</magenta>",
 		cfg.ProtocolType,
 		cfg.DataEncryptionMethod,
 	)
 	log.Infof(
-		"⚖️ <green>Resolver Balancing</green> <magenta>|</magenta> <blue>Strategy</blue>: <magenta>%d</magenta>",
+		"\U00002696 <green>Resolver Balancing</green> <magenta>|</magenta> <blue>Strategy</blue>: <magenta>%d</magenta>",
 		cfg.ResolverBalancingStrategy,
 	)
 	log.Infof(
-		"🌐 <green>Configured Domains</green> <magenta>|</magenta> <magenta>%d</magenta>",
+		"\U0001F310 <green>Configured Domains</green> <magenta>|</magenta> <magenta>%d</magenta>",
 		len(cfg.Domains),
 	)
 	log.Infof(
-		"📡 <green>Loaded Resolvers</green> <magenta>|</magenta> <magenta>%d</magenta> <blue>endpoints</blue>",
+		"\U0001F4E1 <green>Loaded Resolvers</green> <magenta>|</magenta> <magenta>%d</magenta> <blue>endpoints</blue>",
 		len(cfg.Resolvers),
 	)
 	log.Infof(
-		"🧭 <green>Local DNS Listener</green> <magenta>|</magenta> <blue>Enabled</blue>: <yellow>%t</yellow> <magenta>|</magenta> <blue>Addr</blue>: <cyan>%s:%d</cyan>",
+		"\U0001F9ED <green>Local DNS Listener</green> <magenta>|</magenta> <blue>Enabled</blue>: <yellow>%t</yellow> <magenta>|</magenta> <blue>Addr</blue>: <cyan>%s:%d</cyan>",
 		cfg.LocalDNSEnabled,
 		cfg.LocalDNSIP,
 		cfg.LocalDNSPort,
 	)
 	log.Infof(
-		"🧦 <green>Local SOCKS5 Listener</green> <magenta>|</magenta> <blue>Enabled</blue>: <yellow>%t</yellow> <magenta>|</magenta> <blue>Addr</blue>: <cyan>%s:%d</cyan>",
+		"\U0001F9E6 <green>Local SOCKS5 Listener</green> <magenta>|</magenta> <blue>Enabled</blue>: <yellow>%t</yellow> <magenta>|</magenta> <blue>Addr</blue>: <cyan>%s:%d</cyan>",
 		cfg.LocalSOCKS5Enabled,
 		cfg.LocalSOCKS5IP,
 		cfg.LocalSOCKS5Port,
 	)
 	log.Infof(
-		"🔌 <green>Local TCP Listener</green> <magenta>|</magenta> <blue>Mode</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Addr</blue>: <cyan>%s:%d</cyan>",
+		"\U0001F50C <green>Local TCP Listener</green> <magenta>|</magenta> <blue>Mode</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Addr</blue>: <cyan>%s:%d</cyan>",
 		cfg.ProtocolType,
 		cfg.ListenIP,
 		cfg.ListenPort,
 	)
 	log.Infof(
-		"🗂️ <green>Connection Catalog</green> <magenta>|</magenta> <magenta>%d</magenta> <blue>domain-resolver pairs</blue>",
+		"\U0001F5C2 <green>Connection Catalog</green> <magenta>|</magenta> <magenta>%d</magenta> <blue>domain-resolver pairs</blue>",
 		len(app.Connections()),
 	)
 	log.Infof(
-		"✅ <green>Active Connections</green> <magenta>|</magenta> <magenta>%d</magenta>",
+		"\U00002705 <green>Active Connections</green> <magenta>|</magenta> <magenta>%d</magenta>",
 		app.Balancer().ValidCount(),
 	)
 
@@ -89,7 +89,7 @@ func main() {
 	}
 
 	log.Infof(
-		"🤝 <green>Session Established</green> <magenta>|</magenta> <blue>ID</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Cookie</blue>: <magenta>%d</magenta>",
+		"\U0001F91D <green>Session Established</green> <magenta>|</magenta> <blue>ID</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Cookie</blue>: <magenta>%d</magenta>",
 		app.SessionID(),
 		app.SessionCookie(),
 	)

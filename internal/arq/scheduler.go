@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	PackedControlBlockSize         = 5
+	PackedControlBlockSize         = 7
 	clientPackedBlockUsagePercent  = 50
 	serverPackedBlockUsagePercent  = 80
 	maxSchedulerPriority           = 63
@@ -556,7 +556,7 @@ func DefaultPriorityForPacket(packetType uint8) int {
 	case Enums.PACKET_DNS_QUERY_REQ, Enums.PACKET_DNS_QUERY_RES:
 		return 2
 	case Enums.PACKET_DNS_QUERY_REQ_ACK, Enums.PACKET_DNS_QUERY_RES_ACK:
-		return 1
+		return 0
 	case Enums.PACKET_PING, Enums.PACKET_PONG:
 		return 4
 	case Enums.PACKET_STREAM_DATA:
@@ -569,6 +569,8 @@ func DefaultPriorityForPacket(packetType uint8) int {
 func effectivePriorityForPacket(packetType uint8, priority int) int {
 	switch packetType {
 	case Enums.PACKET_STREAM_DATA_ACK,
+		Enums.PACKET_DNS_QUERY_REQ_ACK,
+		Enums.PACKET_DNS_QUERY_RES_ACK,
 		Enums.PACKET_STREAM_RST,
 		Enums.PACKET_STREAM_RST_ACK,
 		Enums.PACKET_STREAM_FIN_ACK,
@@ -692,6 +694,8 @@ func isPackableControlPacket(packet QueuedPacket) bool {
 
 	switch packet.PacketType {
 	case Enums.PACKET_STREAM_DATA_ACK,
+		Enums.PACKET_DNS_QUERY_REQ_ACK,
+		Enums.PACKET_DNS_QUERY_RES_ACK,
 		Enums.PACKET_STREAM_SYN,
 		Enums.PACKET_STREAM_SYN_ACK,
 		Enums.PACKET_STREAM_FIN,
@@ -741,10 +745,12 @@ func appendPackedControlBlock(dst []byte, packet QueuedPacket) []byte {
 		byte(packet.StreamID),
 		byte(packet.SequenceNum>>8),
 		byte(packet.SequenceNum),
+		packet.FragmentID,
+		packet.TotalFragments,
 	)
 }
 
-func ForEachPackedControlBlock(payload []byte, yield func(packetType uint8, streamID uint16, sequenceNum uint16) bool) {
+func ForEachPackedControlBlock(payload []byte, yield func(packetType uint8, streamID uint16, sequenceNum uint16, fragmentID uint8, totalFragments uint8) bool) {
 	if len(payload) < PackedControlBlockSize || yield == nil {
 		return
 	}
@@ -752,7 +758,9 @@ func ForEachPackedControlBlock(payload []byte, yield func(packetType uint8, stre
 		packetType := payload[offset]
 		streamID := uint16(payload[offset+1])<<8 | uint16(payload[offset+2])
 		sequenceNum := uint16(payload[offset+3])<<8 | uint16(payload[offset+4])
-		if !yield(packetType, streamID, sequenceNum) {
+		fragmentID := payload[offset+5]
+		totalFragments := payload[offset+6]
+		if !yield(packetType, streamID, sequenceNum, fragmentID, totalFragments) {
 			return
 		}
 	}

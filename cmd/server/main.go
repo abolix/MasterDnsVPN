@@ -29,7 +29,7 @@ func main() {
 	}
 
 	log := logger.New("MasterDnsVPN Server", cfg.LogLevel)
-	log.Infof("🚀 <magenta>MasterDnsVPN Server starting ...</magenta>")
+	log.Infof("\U0001F680 <magenta>MasterDnsVPN Server starting ...</magenta>")
 
 	keyInfo, err := security.EnsureServerEncryptionKey(cfg)
 	if err != nil {
@@ -52,10 +52,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Infof("🚀 <green>Server Configuration Loaded</green>")
+	log.Infof("\U0001F680 <green>Server Configuration Loaded</green>")
 	if len(cfg.Domain) > 0 {
 		log.Infof(
-			"🌐 <green>Allowed Domains: <cyan>%s</cyan>, Min Label:<cyan>%d</cyan></green>",
+			"\U0001F310 <green>Allowed Domains: <cyan>%s</cyan>, Min Label:<cyan>%d</cyan></green>",
 			strings.Join(cfg.Domain, ", "),
 			cfg.MinVPNLabelLength,
 		)
@@ -81,7 +81,7 @@ func main() {
 		)
 	} else {
 		log.Infof(
-			"🗂️ <green>Encryption Key Loaded, Path: <cyan>%s</cyan></green>",
+			"\U0001F5C2 <green>Encryption Key Loaded, Path: <cyan>%s</cyan></green>",
 			keyInfo.Path,
 		)
 	}

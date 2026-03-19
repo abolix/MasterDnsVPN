@@ -40,7 +40,7 @@ func (c *Client) RunLocalDNSListener(ctx context.Context) error {
 	defer conn.Close()
 
 	c.log.Infof(
-		"📡 <green>Local DNS Listener Ready</green> <magenta>|</magenta> <blue>Addr</blue>: <cyan>%s:%d</cyan> <magenta>|</magenta> <blue>Workers</blue>: <magenta>%d</magenta>",
+		"\U0001F4E1 <green>Local DNS Listener Ready</green> <magenta>|</magenta> <blue>Addr</blue>: <cyan>%s:%d</cyan> <magenta>|</magenta> <blue>Workers</blue>: <magenta>%d</magenta>",
 		c.cfg.LocalDNSIP,
 		c.cfg.LocalDNSPort,
 		c.cfg.LocalDNSWorkers,

@@ -1662,8 +1662,8 @@ func TestHandlePackedServerControlBlocksAcksQueuedStreamPackets(t *testing.T) {
 
 	payload := make([]byte, 0, 2*arq.PackedControlBlockSize)
 	payload = append(payload,
-		Enums.PACKET_STREAM_DATA_ACK, 0x00, 0x09, 0x00, 0x07,
-		Enums.PACKET_STREAM_FIN_ACK, 0x00, 0x0A, 0x00, 0x01,
+		Enums.PACKET_STREAM_DATA_ACK, 0x00, 0x09, 0x00, 0x07, 0x00, 0x00,
+		Enums.PACKET_STREAM_FIN_ACK, 0x00, 0x0A, 0x00, 0x01, 0x00, 0x00,
 	)
 
 	if err := c.handlePackedServerControlBlocks(payload, time.Second); err != nil {
@@ -1674,6 +1674,42 @@ func TestHandlePackedServerControlBlocksAcksQueuedStreamPackets(t *testing.T) {
 	defer stream.mu.Unlock()
 	if len(stream.TXInFlight) != 0 {
 		t.Fatalf("expected packed ACK to clear inflight packet, got=%d", len(stream.TXInFlight))
+	}
+}
+
+func TestHandlePackedServerControlBlocksAcksDNSRequestFragment(t *testing.T) {
+	c := New(config.ClientConfig{}, nil, nil)
+	sequenceNum := uint16(14)
+	c.stream0Runtime.mu.Lock()
+	c.stream0Runtime.dnsRequests[sequenceNum] = &stream0DNSRequestState{
+		fragments: map[uint8]*stream0DNSFragmentState{
+			0: {
+				packet: arq.QueuedPacket{
+					PacketType:     Enums.PACKET_DNS_QUERY_REQ,
+					StreamID:       0,
+					SequenceNum:    sequenceNum,
+					FragmentID:     0,
+					TotalFragments: 1,
+				},
+				createdAt: time.Now(),
+			},
+		},
+	}
+	c.stream0Runtime.mu.Unlock()
+
+	payload := make([]byte, 0, arq.PackedControlBlockSize)
+	payload = append(payload,
+		Enums.PACKET_DNS_QUERY_REQ_ACK, 0x00, 0x00, byte(sequenceNum>>8), byte(sequenceNum), 0x00, 0x01,
+	)
+
+	if err := c.handlePackedServerControlBlocks(payload, time.Second); err != nil {
+		t.Fatalf("handlePackedServerControlBlocks returned error: %v", err)
+	}
+
+	c.stream0Runtime.mu.Lock()
+	defer c.stream0Runtime.mu.Unlock()
+	if _, ok := c.stream0Runtime.dnsRequests[sequenceNum]; ok {
+		t.Fatal("expected packed dns ack to clear queued dns request fragment")
 	}
 }
 

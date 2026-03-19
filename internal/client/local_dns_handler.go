@@ -58,7 +58,7 @@ func (c *Client) handleDNSQueryPacket(query []byte) ([]byte, *dnsDispatchRequest
 	if cached, ok := c.localDNSCache.GetReady(cacheKey, query, now); ok {
 		if c.log != nil {
 			c.log.Infof(
-				"📦 <green>Local DNS Cache Hit</green> <magenta>|</magenta> <blue>Domain</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Type</blue>: <yellow>%s</yellow>",
+				"\U0001F4E6 <green>Local DNS Cache Hit</green> <magenta>|</magenta> <blue>Domain</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Type</blue>: <yellow>%s</yellow>",
 				metadata.Domain,
 				recordTypeName,
 			)
@@ -95,7 +95,7 @@ func (c *Client) resolveDNSQueryPacket(query []byte) []byte {
 	}
 	if c.log != nil {
 		c.log.Infof(
-			"🚇 <green>Local DNS Redirected To Tunnel</green> <magenta>|</magenta> <blue>Domain</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Type</blue>: <yellow>%s</yellow>",
+			"\U0001F687 <green>Local DNS Redirected To Tunnel</green> <magenta>|</magenta> <blue>Domain</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Type</blue>: <yellow>%s</yellow>",
 			dispatch.Domain,
 			Enums.DNSRecordTypeName(dispatch.QType),
 		)
