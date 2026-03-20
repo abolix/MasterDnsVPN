@@ -100,6 +100,14 @@ func (c *Client) buildSessionInitPayload() ([]byte, bool, [4]byte, error) {
 	}
 	copy(verifyCode[:], randomPart)
 
+	// Use pool for temporary buffer to avoid allocation
+	buf := c.udpBufferPool.Get().([]byte)
+	defer c.udpBufferPool.Put(buf)
+
+	if sessionInitPayloadSize > len(buf) {
+		return nil, false, verifyCode, errors.New("buffer pool slice too small")
+	}
+
 	payload := make([]byte, sessionInitPayloadSize)
 	if c.cfg.BaseEncodeData {
 		payload[0] = mtuProbeBase64Reply
@@ -120,6 +128,7 @@ func (c *Client) nextSessionInitAttempt() (Connection, []byte, [4]byte, error) {
 	c.initStateMu.Lock()
 	defer c.initStateMu.Unlock()
 
+	// Persistence Check: reuse existing token/payload if already ready
 	if !c.sessionInitReady {
 		payload, responseBase64, verifyCode, err := c.buildSessionInitPayload()
 		if err != nil {
@@ -132,24 +141,28 @@ func (c *Client) nextSessionInitAttempt() (Connection, []byte, [4]byte, error) {
 		c.sessionInitCursor = 0
 	}
 
-	validCount := 0
-	for _, conn := range c.connections {
-		if conn.IsValid {
-			validCount++
-		}
-	}
-	if validCount == 0 {
+	snap := c.balancer.snapshot.Load()
+	if snap == nil || len(snap.valid) == 0 {
 		return Connection{}, nil, empty, ErrNoValidConnections
 	}
 
+	// Use the cursor to rotate between valid resolvers in a Round-Robin fashion
+	validLen := len(snap.valid)
 	start := c.sessionInitCursor
-	for checked := 0; checked < len(c.connections); checked++ {
-		idx := (start + checked) % len(c.connections)
-		conn := c.connections[idx]
+	for checked := 0; checked < validLen; checked++ {
+		idxInValid := (start + checked) % validLen
+		connIdx := snap.valid[idxInValid]
+
+		if connIdx < 0 || connIdx >= len(c.connections) {
+			continue
+		}
+
+		conn := c.connections[connIdx]
 		if !conn.IsValid {
 			continue
 		}
-		c.sessionInitCursor = (idx + 1) % len(c.connections)
+
+		c.sessionInitCursor = (idxInValid + 1) % validLen
 		return conn, c.sessionInitPayload, c.sessionInitVerify, nil
 	}
 
