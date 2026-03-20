@@ -8,10 +8,10 @@
 package dnsparser
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"strings"
+	"sync/atomic"
 
 	baseCodec "masterdnsvpn-go/internal/basecodec"
 	"masterdnsvpn-go/internal/compression"
@@ -38,10 +38,7 @@ func BuildTXTQuestionPacket(name string, qType uint16, ednsUDPSize uint16) ([]by
 		return nil, err
 	}
 
-	requestID, err := randomUint16()
-	if err != nil {
-		return nil, err
-	}
+	requestID := nextDNSRequestID()
 
 	arCount := uint16(0)
 	optLen := 0
@@ -424,7 +421,7 @@ func extractTXTBytes(rData []byte) []byte {
 		return rData[1:]
 	}
 
-	out := make([]byte, 0, len(rData))
+	totalLen := 0
 	for offset := 0; offset < len(rData); {
 		size := int(rData[offset])
 		offset++
@@ -432,10 +429,30 @@ func extractTXTBytes(rData []byte) []byte {
 			continue
 		}
 		if offset+size > len(rData) {
-			out = append(out, rData[offset:]...)
+			totalLen += len(rData) - offset
 			break
 		}
-		out = append(out, rData[offset:offset+size]...)
+		totalLen += size
+		offset += size
+	}
+
+	if totalLen == 0 {
+		return nil
+	}
+
+	out := make([]byte, totalLen)
+	writeOffset := 0
+	for offset := 0; offset < len(rData); {
+		size := int(rData[offset])
+		offset++
+		if size == 0 {
+			continue
+		}
+		if offset+size > len(rData) {
+			writeOffset += copy(out[writeOffset:], rData[offset:])
+			break
+		}
+		writeOffset += copy(out[writeOffset:], rData[offset:offset+size])
 		offset += size
 	}
 	return out
@@ -539,7 +556,8 @@ func encodeDNSNameStrict(name string) ([]byte, error) {
 		return nil, ErrInvalidName
 	}
 
-	encoded := make([]byte, 0, len(name)+2)
+	encoded := make([]byte, len(name)+2)
+	writeOffset := 0
 	labelStart := 0
 	for i := 0; i <= len(name); i++ {
 		if i < len(name) && name[i] != '.' {
@@ -549,12 +567,14 @@ func encodeDNSNameStrict(name string) ([]byte, error) {
 		if labelLen == 0 || labelLen > maxDNSLabelLen {
 			return nil, ErrInvalidName
 		}
-		encoded = append(encoded, byte(labelLen))
-		encoded = append(encoded, name[labelStart:i]...)
+		encoded[writeOffset] = byte(labelLen)
+		writeOffset++
+		writeOffset += copy(encoded[writeOffset:], name[labelStart:i])
 		labelStart = i + 1
 	}
-	encoded = append(encoded, 0)
-	return encoded, nil
+	encoded[writeOffset] = 0
+	writeOffset++
+	return encoded[:writeOffset], nil
 }
 
 func encodedQNameLen(encodedChars int, domainLen int) int {
@@ -565,12 +585,10 @@ func encodedQNameLen(encodedChars int, domainLen int) int {
 	return encodedChars + labelSplits + 1 + domainLen
 }
 
-func randomUint16() (uint16, error) {
-	var buf [2]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return 0, err
-	}
-	return binary.BigEndian.Uint16(buf[:]), nil
+var dnsIDCounter atomic.Uint32
+
+func nextDNSRequestID() uint16 {
+	return uint16(dnsIDCounter.Add(1))
 }
 
 func min(a, b int) int {
