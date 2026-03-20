@@ -148,7 +148,7 @@ func (m *Manager) EnqueueData(packetType uint8, streamID uint16, sequenceNum uin
 		PacketType:  packetType,
 		StreamID:    streamID,
 		SequenceNum: sequenceNum,
-		Payload:     clonePayload(payload),
+		Payload:     AllocPayload(payload),
 		Priority:    0,
 		RequiresAck: true,
 		CreatedAt:   now,
@@ -170,7 +170,7 @@ func (m *Manager) EnqueueControl(packetType uint8, ackPacketType uint8, streamID
 		PacketType:     packetType,
 		StreamID:       streamID,
 		SequenceNum:    sequenceNum,
-		Payload:        clonePayload(payload),
+		Payload:        AllocPayload(payload),
 		Priority:       priority,
 		AckPacketType:  ackPacketType,
 		RequiresAck:    ackPacketType != 0,
@@ -250,15 +250,6 @@ func normalizePolicy(policy RetryPolicy) RetryPolicy {
 		policy.MaxRetries = 1
 	}
 	return policy
-}
-
-func clonePayload(payload []byte) []byte {
-	if len(payload) == 0 {
-		return nil
-	}
-	cloned := make([]byte, len(payload))
-	copy(cloned, payload)
-	return cloned
 }
 
 func packetKey(packetType uint8, sequenceNum uint16) uint32 {
@@ -385,6 +376,12 @@ func (q *packetQueue) removeByAck(ack uint32) bool {
 
 func (q *packetQueue) clearAll() int {
 	removed := len(q.items)
+	for _, item := range q.items {
+		if !item.removed {
+			FreePayload(item.packet.Payload)
+			item.packet.Payload = nil
+		}
+	}
 	q.init()
 	return removed
 }
@@ -396,6 +393,8 @@ func (q *packetQueue) prune(keep func(Packet) bool) int {
 			continue
 		}
 		item.removed = true
+		FreePayload(item.packet.Payload)
+		item.packet.Payload = nil
 		delete(q.items, key)
 		if item.ackKey != 0 {
 			delete(q.ackIndex, item.ackKey)
@@ -410,6 +409,8 @@ func (q *packetQueue) remove(item *queuedPacket) {
 		return
 	}
 	item.removed = true
+	FreePayload(item.packet.Payload)
+	item.packet.Payload = nil
 	delete(q.items, item.key)
 	if item.ackKey != 0 {
 		delete(q.ackIndex, item.ackKey)

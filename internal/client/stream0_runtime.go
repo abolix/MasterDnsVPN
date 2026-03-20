@@ -359,6 +359,8 @@ func (r *stream0Runtime) nextPingSchedule(now time.Time) (bool, time.Duration) {
 }
 
 func (r *stream0Runtime) processDequeue(packet arq.QueuedPacket) {
+	defer arq.FreePayload(packet.Payload)
+
 	response, err := r.client.sendScheduledPacket(packet)
 	if err != nil {
 		r.handleDequeueFailure(packet, time.Now())

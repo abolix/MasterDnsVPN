@@ -720,7 +720,9 @@ func (s *Server) serveQueuedOrPong(questionPacket []byte, requestName string, se
 
 	s.expireStalledOutboundStreams(sessionID, now)
 	if queued, ok := s.streamOutbound.Next(sessionID, now); ok {
-		return s.buildSessionVPNResponse(questionPacket, requestName, sessionRecord, queued)
+		resp := s.buildSessionVPNResponse(questionPacket, requestName, sessionRecord, queued)
+		arq.FreePayload(queued.Payload)
+		return resp
 	}
 
 	payload := s.nextPongPayload()

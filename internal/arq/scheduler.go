@@ -9,9 +9,24 @@ package arq
 
 import (
 	"container/heap"
-
+	"sync"
+	
 	Enums "masterdnsvpn-go/internal/enums"
 )
+
+var queueOwnerPool = sync.Pool{
+	New: func() any {
+		return &queueOwner{
+			queue:           make(packetPriorityHeap, 0, 8),
+			trackTypes:      make(map[uint32]struct{}, 8),
+			trackData:       make(map[uint32]struct{}, 8),
+			trackAck:        make(map[uint32]struct{}, 8),
+			trackResend:     make(map[uint32]struct{}, 8),
+			trackSeqPackets: make(map[typeSeqKey]struct{}, 8),
+			trackFragments:  make(map[fragmentKey]struct{}, 8),
+		}
+	},
+}
 
 const (
 	PackedControlBlockSize         = 7
@@ -97,7 +112,7 @@ func NewScheduler(maxPackedBlocks int) *Scheduler {
 		owners:          make(map[uint16]*queueOwner, 8),
 		maxPackedBlocks: normalizePackedBlockLimit(maxPackedBlocks),
 	}
-	scheduler.owners[0] = newQueueOwner(0)
+	scheduler.owners[0] = allocQueueOwner(0)
 	return scheduler
 }
 
@@ -144,7 +159,7 @@ func (s *Scheduler) Enqueue(target QueueTarget, packet QueuedPacket) bool {
 
 	owner := s.ownerFor(target, packet.StreamID)
 	packet.Priority = effectivePriorityForPacket(packet.PacketType, packet.Priority)
-	packet.Payload = clonePayload(packet.Payload)
+	packet.Payload = AllocPayload(packet.Payload)
 
 	if !owner.track(packet) {
 		return false
@@ -207,6 +222,7 @@ func (s *Scheduler) HandleStreamReset(streamID uint16) int {
 	if owner, ok := s.owners[streamID]; ok {
 		dropped += s.clearOwner(owner)
 		delete(s.owners, streamID)
+		freeQueueOwner(owner)
 	}
 	dropped += s.pruneOwner(s.owners[0], func(packet QueuedPacket) bool {
 		if packet.StreamID != streamID {
@@ -229,6 +245,7 @@ func (s *Scheduler) HandleSessionReset() int {
 		}
 		dropped += s.clearOwner(owner)
 		delete(s.owners, ownerID)
+		freeQueueOwner(owner)
 	}
 
 	dropped += s.pruneOwner(s.owners[0], func(packet QueuedPacket) bool {
@@ -247,13 +264,13 @@ func (s *Scheduler) ownerFor(target QueueTarget, streamID uint16) *queueOwner {
 		return owner
 	}
 
-	owner = newQueueOwner(streamID)
+	owner = allocQueueOwner(streamID)
 	s.owners[streamID] = owner
 	return owner
 }
 
 func (s *Scheduler) dequeuePacked(first *queuedItem, firstOwnerID uint16) DequeueResult {
-	blocks := make([]byte, 0, s.maxPackedBlocks*PackedControlBlockSize)
+	blocks := GetCapacityPayload(s.maxPackedBlocks * PackedControlBlockSize)
 	blocks = appendPackedControlBlock(blocks, first.packet)
 	blockCount := 1
 	priority := first.priority
@@ -390,17 +407,22 @@ func (s *Scheduler) pruneOwner(owner *queueOwner, keep func(QueuedPacket) bool) 
 	return removed
 }
 
-func newQueueOwner(streamID uint16) *queueOwner {
-	return &queueOwner{
-		streamID:        streamID,
-		queue:           make(packetPriorityHeap, 0, 8),
-		trackTypes:      make(map[uint32]struct{}, 8),
-		trackData:       make(map[uint32]struct{}, 8),
-		trackAck:        make(map[uint32]struct{}, 8),
-		trackResend:     make(map[uint32]struct{}, 8),
-		trackSeqPackets: make(map[typeSeqKey]struct{}, 8),
-		trackFragments:  make(map[fragmentKey]struct{}, 8),
+func freeQueueOwner(o *queueOwner) {
+	if o == nil {
+		return
 	}
+	o.resetTracking()
+	for i := range o.queue {
+		o.queue[i] = nil
+	}
+	o.queue = o.queue[:0]
+	queueOwnerPool.Put(o)
+}
+
+func allocQueueOwner(streamID uint16) *queueOwner {
+	o := queueOwnerPool.Get().(*queueOwner)
+	o.streamID = streamID
+	return o
 }
 
 func (o *queueOwner) track(packet QueuedPacket) bool {

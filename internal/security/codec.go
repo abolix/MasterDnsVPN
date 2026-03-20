@@ -16,6 +16,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync"
 
 	"golang.org/x/crypto/chacha20"
 
@@ -33,11 +34,33 @@ const (
 	aesNonceSize    = 12
 )
 
+var cryptoBufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 4096)
+		return &b
+	},
+}
+
+func getCryptoBuffer(size int) *[]byte {
+	bufPtr := cryptoBufferPool.Get().(*[]byte)
+	if cap(*bufPtr) < size {
+		b := make([]byte, size*2)
+		bufPtr = &b
+	}
+	return bufPtr
+}
+
+func putCryptoBuffer(bufPtr *[]byte) {
+	if bufPtr != nil {
+		cryptoBufferPool.Put(bufPtr)
+	}
+}
+
 type Codec struct {
 	method  int
 	key     []byte
-	encrypt func([]byte) ([]byte, error)
-	decrypt func([]byte) ([]byte, error)
+	encrypt func(dst, src []byte) ([]byte, error)
+	decrypt func(dst, src []byte) ([]byte, error)
 }
 
 func NewCodecFromConfig(cfg config.ServerConfig, rawKey string) (*Codec, error) {
@@ -83,14 +106,14 @@ func (c *Codec) Encrypt(data []byte) ([]byte, error) {
 	if c == nil {
 		return nil, ErrInvalidCodecMethod
 	}
-	return c.encrypt(data)
+	return c.encrypt(nil, data)
 }
 
 func (c *Codec) Decrypt(data []byte) ([]byte, error) {
 	if c == nil {
 		return nil, ErrInvalidCodecMethod
 	}
-	return c.decrypt(data)
+	return c.decrypt(nil, data)
 }
 
 func (c *Codec) Method() int {
@@ -108,7 +131,10 @@ func (c *Codec) EncryptAndEncodeLowerBase36(data []byte) (string, error) {
 		return baseCodec.EncodeLowerBase36(data), nil
 	}
 
-	encrypted, err := c.encrypt(data)
+	bufPtr := getCryptoBuffer(len(data) + 64)
+	defer putCryptoBuffer(bufPtr)
+
+	encrypted, err := c.encrypt((*bufPtr)[:0], data)
 	if err != nil {
 		return "", err
 	}
@@ -127,7 +153,7 @@ func (c *Codec) DecodeLowerBase36AndDecrypt(data []byte) ([]byte, error) {
 	if c.method == 0 {
 		return decoded, nil
 	}
-	return c.decrypt(decoded)
+	return c.decrypt(nil, decoded)
 }
 
 func (c *Codec) DecodeLowerBase36StringAndDecrypt(data string) ([]byte, error) {
@@ -142,50 +168,78 @@ func (c *Codec) DecodeLowerBase36StringAndDecrypt(data string) ([]byte, error) {
 	if c.method == 0 {
 		return decoded, nil
 	}
-	return c.decrypt(decoded)
+	return c.decrypt(nil, decoded)
 }
 
-func (c *Codec) noCrypto(data []byte) ([]byte, error) {
-	return data, nil
+func (c *Codec) noCrypto(dst, data []byte) ([]byte, error) {
+	if cap(dst) < len(data) {
+		dst = make([]byte, len(data))
+	} else {
+		dst = dst[:len(data)]
+	}
+	copy(dst, data)
+	return dst, nil
 }
 
-func (c *Codec) xorCrypto(data []byte) ([]byte, error) {
+func (c *Codec) xorCrypto(dst, data []byte) ([]byte, error) {
 	key := c.key
 	keyLen := len(key)
 	if len(data) == 0 || keyLen == 0 {
-		return data, nil
+		if cap(dst) < len(data) {
+			dst = make([]byte, len(data))
+		} else {
+			dst = dst[:len(data)]
+		}
+		copy(dst, data)
+		return dst, nil
 	}
 
-	out := make([]byte, len(data))
+	if cap(dst) < len(data) {
+		dst = make([]byte, len(data))
+	} else {
+		dst = dst[:len(data)]
+	}
+
 	if keyLen == 1 {
 		mask := key[0]
 		for i := 0; i < len(data); i++ {
-			out[i] = data[i] ^ mask
+			dst[i] = data[i] ^ mask
 		}
-		return out, nil
+		return dst, nil
 	}
 
 	fullBlocks := len(data) / keyLen
 	offset := 0
 	for block := 0; block < fullBlocks; block++ {
 		for i := 0; i < keyLen; i++ {
-			out[offset+i] = data[offset+i] ^ key[i]
+			dst[offset+i] = data[offset+i] ^ key[i]
 		}
 		offset += keyLen
 	}
 	for i := offset; i < len(data); i++ {
-		out[i] = data[i] ^ key[i-offset]
+		dst[i] = data[i] ^ key[i-offset]
 	}
-	return out, nil
+	return dst, nil
 }
 
-func (c *Codec) chachaEncrypt(data []byte) ([]byte, error) {
+func (c *Codec) chachaEncrypt(dst, data []byte) ([]byte, error) {
 	if len(data) == 0 {
-		return data, nil
+		if cap(dst) == 0 {
+			dst = make([]byte, 0)
+		} else {
+			dst = dst[:0]
+		}
+		return dst, nil
 	}
 
-	out := make([]byte, chachaNonceSize+len(data))
-	nonce := out[:chachaNonceSize]
+	reqSize := chachaNonceSize + len(data)
+	if cap(dst) < reqSize {
+		dst = make([]byte, reqSize)
+	} else {
+		dst = dst[:reqSize]
+	}
+
+	nonce := dst[:chachaNonceSize]
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("generate chacha20 nonce: %w", err)
 	}
@@ -195,13 +249,13 @@ func (c *Codec) chachaEncrypt(data []byte) ([]byte, error) {
 		return nil, err
 	}
 	stream.SetCounter(binary.LittleEndian.Uint32(nonce[:4]))
-	stream.XORKeyStream(out[chachaNonceSize:], data)
-	return out, nil
+	stream.XORKeyStream(dst[chachaNonceSize:], data)
+	return dst, nil
 }
 
-func (c *Codec) chachaDecrypt(data []byte) ([]byte, error) {
+func (c *Codec) chachaDecrypt(dst, data []byte) ([]byte, error) {
 	if len(data) == 0 {
-		return data, nil
+		return nil, nil // Return nil per original intention
 	}
 	if len(data) <= chachaNonceSize {
 		return nil, ErrInvalidCiphertext
@@ -209,46 +263,70 @@ func (c *Codec) chachaDecrypt(data []byte) ([]byte, error) {
 
 	nonce := data[:chachaNonceSize]
 	ciphertext := data[chachaNonceSize:]
+	
+	if cap(dst) < len(ciphertext) {
+		dst = make([]byte, len(ciphertext))
+	} else {
+		dst = dst[:len(ciphertext)]
+	}
+
 	stream, err := chacha20.NewUnauthenticatedCipher(c.key, nonce[4:])
 	if err != nil {
 		return nil, err
 	}
 	stream.SetCounter(binary.LittleEndian.Uint32(nonce[:4]))
 
-	out := make([]byte, len(ciphertext))
-	stream.XORKeyStream(out, ciphertext)
-	return out, nil
+	stream.XORKeyStream(dst, ciphertext)
+	return dst, nil
 }
 
-func (c *Codec) makeAESEncryptor(aead cipher.AEAD) func([]byte) ([]byte, error) {
-	return func(data []byte) ([]byte, error) {
-		if len(data) == 0 {
-			return data, nil
+func (c *Codec) makeAESEncryptor(aead cipher.AEAD) func(dst, src []byte) ([]byte, error) {
+	return func(dst, src []byte) ([]byte, error) {
+		if len(src) == 0 {
+			if cap(dst) == 0 {
+				dst = make([]byte, 0)
+			} else {
+				dst = dst[:0]
+			}
+			return dst, nil
 		}
 
-		out := make([]byte, aesNonceSize, aesNonceSize+len(data)+aead.Overhead())
-		nonce := out[:aesNonceSize]
+		reqSize := aesNonceSize + len(src) + aead.Overhead()
+		if cap(dst) < reqSize {
+			dst = make([]byte, aesNonceSize, reqSize)
+		} else {
+			dst = dst[:aesNonceSize]
+		}
+
+		nonce := dst[:aesNonceSize]
 		if _, err := rand.Read(nonce); err != nil {
 			return nil, fmt.Errorf("generate aes-gcm nonce: %w", err)
 		}
 
-		out = aead.Seal(out, nonce, data, nil)
-		return out, nil
+		dst = aead.Seal(dst, nonce, src, nil)
+		return dst, nil
 	}
 }
 
-func (c *Codec) makeAESDecryptor(aead cipher.AEAD) func([]byte) ([]byte, error) {
-	return func(data []byte) ([]byte, error) {
-		if len(data) == 0 {
-			return data, nil
+func (c *Codec) makeAESDecryptor(aead cipher.AEAD) func(dst, src []byte) ([]byte, error) {
+	return func(dst, src []byte) ([]byte, error) {
+		if len(src) == 0 {
+			return nil, nil
 		}
-		if len(data) <= aesNonceSize {
+		if len(src) <= aesNonceSize {
 			return nil, ErrInvalidCiphertext
 		}
 
-		nonce := data[:aesNonceSize]
-		ciphertext := data[aesNonceSize:]
-		plaintext, err := aead.Open(nil, nonce, ciphertext, nil)
+		nonce := src[:aesNonceSize]
+		ciphertext := src[aesNonceSize:]
+
+		if cap(dst) == 0 {
+			dst = make([]byte, 0, len(ciphertext))
+		} else {
+			dst = dst[:0]
+		}
+
+		plaintext, err := aead.Open(dst, nonce, ciphertext, nil)
 		if err != nil {
 			return nil, ErrInvalidCiphertext
 		}
