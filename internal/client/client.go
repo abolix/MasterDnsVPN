@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"masterdnsvpn-go/internal/arq"
-	"masterdnsvpn-go/internal/compression"
 	"masterdnsvpn-go/internal/config"
 	dnsCache "masterdnsvpn-go/internal/dnscache"
 	dnsParser "masterdnsvpn-go/internal/dnsparser"
@@ -155,11 +154,51 @@ func (c *Client) NotifyPacket(packetType uint8, isInbound bool) {
 }
 
 func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
+	if !packet.HasStreamID {
+		return nil
+	}
+
+	c.streamsMu.Lock()
+	s, ok := c.active_streams[packet.StreamID]
+	c.streamsMu.Unlock()
+
+	if !ok || s == nil {
+		// Stream not found, potentially old packet or race condition
+		return nil
+	}
+
+	arqObj, ok := s.Stream.(*arq.ARQ)
+	if !ok {
+		return nil
+	}
+
+	switch packet.PacketType {
+	case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND:
+		arqObj.ReceiveData(packet.SequenceNum, packet.Payload)
+	case Enums.PACKET_STREAM_DATA_ACK:
+		arqObj.ReceiveAck(packet.SequenceNum)
+	default:
+		// Handle generic control ACKs (acks to our SYN, etc.)
+		arqObj.ReceiveControlAck(packet.PacketType, packet.SequenceNum, packet.FragmentID)
+	}
+
 	return nil
 }
 
-func (c *Client) HandlePackedControlBlocks(payload []byte) error {
-	return nil
+func (c *Client) getStreamARQ(streamID uint16) (*arq.ARQ, error) {
+	c.streamsMu.Lock()
+	s, ok := c.active_streams[streamID]
+	c.streamsMu.Unlock()
+
+	if !ok || s == nil {
+		return nil, fmt.Errorf("stream not found")
+	}
+
+	arqObj, ok := s.Stream.(*arq.ARQ)
+	if !ok {
+		return nil, fmt.Errorf("stream is not ARQ")
+	}
+	return arqObj, nil
 }
 
 // clientStreamTXPacket represents a queued packet pending transmission or retransmission.
@@ -394,6 +433,7 @@ func (c *Client) Run(ctx context.Context) error {
 			if !c.successMTUChecks {
 				if err := c.RunInitialMTUTests(ctx); err != nil {
 					c.log.Errorf("<red>MTU tests failed: %v</red>", err)
+					c.successMTUChecks = false
 					// Wait a bit before retrying or exiting if critical
 					select {
 					case <-ctx.Done():
@@ -402,6 +442,19 @@ func (c *Client) Run(ctx context.Context) error {
 					}
 					continue
 				}
+
+				if c.syncedUploadMTU <= 0 || c.syncedDownloadMTU <= 0 {
+					c.successMTUChecks = false
+					c.log.Errorf("<red>❌ MTU tests failed: Upload MTU: %d, Download MTU: %d</red>", c.syncedUploadMTU, c.syncedDownloadMTU)
+					select {
+					case <-ctx.Done():
+						return nil
+					case <-time.After(5 * time.Second):
+					}
+					continue
+				}
+
+				c.successMTUChecks = true
 			}
 
 			if !c.sessionReady {
@@ -486,124 +539,6 @@ func isPreSessionResponseType(packetType uint8) bool {
 	default:
 		return false
 	}
-}
-
-// applySyncedMTUState updates the client's internal MTU state after successful probing.
-func (c *Client) applySyncedMTUState(uploadMTU int, downloadMTU int, uploadChars int) {
-	if c == nil {
-		return
-	}
-	c.successMTUChecks = uploadMTU > 0 && downloadMTU > 0
-	c.syncedUploadMTU = uploadMTU
-	c.syncedDownloadMTU = downloadMTU
-	c.syncedUploadChars = uploadChars
-	c.safeUploadMTU = computeSafeUploadMTU(uploadMTU, c.mtuCryptoOverhead)
-	c.updateMaxPackedBlocks()
-	c.applySessionCompressionPolicy()
-	if c.log != nil && c.successMTUChecks {
-		c.log.Infof("\U0001F4CF <green>MTU state applied: UP=%d, DOWN=%d</green>", uploadMTU, downloadMTU)
-	}
-}
-
-func (c *Client) updateMaxPackedBlocks() {
-	c.maxPackedBlocks = computeClientPackedControlBlockLimit(
-		c.syncedUploadMTU,
-		c.cfg.MaxPacketsPerBatch,
-	)
-}
-
-func (c *Client) applySessionCompressionPolicy() {
-	if c == nil {
-		return
-	}
-
-	minSize := c.cfg.CompressionMinSize
-	if minSize <= 0 {
-		minSize = compression.DefaultMinSize
-	}
-
-	uploadCompression := compression.NormalizeAvailableType(c.uploadCompression)
-	downloadCompression := compression.NormalizeAvailableType(c.downloadCompression)
-
-	const mtuWarningThreshold = 100
-
-	if c.syncedUploadMTU > 0 && c.syncedUploadMTU < mtuWarningThreshold {
-		if uploadCompression != compression.TypeOff && c.log != nil {
-			c.log.Warnf(
-				"⚠️ <red>Session Compression Upload: <cyan>%s</cyan> (Disabled due to low MTU: <cyan>%d</cyan>)</red>",
-				compression.TypeName(uploadCompression),
-				c.syncedUploadMTU,
-			)
-		}
-		uploadCompression = compression.TypeOff
-		c.cfg.UploadCompressionType = int(compression.TypeOff)
-	} else if c.syncedUploadMTU > 0 && c.syncedUploadMTU <= minSize {
-		if uploadCompression != compression.TypeOff && c.log != nil {
-			c.log.Infof(
-				"\U0001F5DC <green>Session Compression Upload: <cyan>%s</cyan> (Disabled due to MinSize MTU: <cyan>%d</cyan>)</green>",
-				compression.TypeName(uploadCompression),
-				c.syncedUploadMTU,
-			)
-		}
-		uploadCompression = compression.TypeOff
-	}
-
-	if c.syncedDownloadMTU > 0 && c.syncedDownloadMTU < mtuWarningThreshold {
-		if downloadCompression != compression.TypeOff && c.log != nil {
-			c.log.Warnf(
-				"⚠️ <red>Session Compression Download: <cyan>%s</cyan> (Disabled due to low MTU: <cyan>%d</cyan>)</red>",
-				compression.TypeName(downloadCompression),
-				c.syncedDownloadMTU,
-			)
-		}
-		downloadCompression = compression.TypeOff
-		c.cfg.DownloadCompressionType = int(compression.TypeOff)
-	} else if c.syncedDownloadMTU > 0 && c.syncedDownloadMTU <= minSize {
-		if downloadCompression != compression.TypeOff && c.log != nil {
-			c.log.Infof(
-				"\U0001F5DC <green>Session Compression Download: <cyan>%s</cyan> (Disabled due to MinSize MTU: <cyan>%d</cyan>)</green>",
-				compression.TypeName(downloadCompression),
-				c.syncedDownloadMTU,
-			)
-		}
-		downloadCompression = compression.TypeOff
-	}
-
-	c.uploadCompression = uploadCompression
-	c.downloadCompression = downloadCompression
-
-	if c.log != nil {
-		c.log.Infof(
-			"\U0001F9E9 <green>Effective Compression Upload: <cyan>%s</cyan> Download: <cyan>%s</cyan></green>",
-			compression.TypeName(c.uploadCompression),
-			compression.TypeName(c.downloadCompression),
-		)
-	}
-}
-
-const (
-	packedControlBlockSize         = 7
-	clientPackedBlockUsagePercent  = 50
-	defaultPackedControlBlockLimit = 1
-)
-
-func computeClientPackedControlBlockLimit(mtu int, maxPacketsPerBatch int) int {
-	if mtu < 1 {
-		return defaultPackedControlBlockLimit
-	}
-	usableBudget := (mtu * clientPackedBlockUsagePercent) / 100
-	mtuLimit := usableBudget / packedControlBlockSize
-	if mtuLimit < 1 {
-		mtuLimit = defaultPackedControlBlockLimit
-	}
-	userLimit := maxPacketsPerBatch
-	if userLimit < 1 {
-		userLimit = defaultPackedControlBlockLimit
-	}
-	if userLimit < mtuLimit {
-		return userLimit
-	}
-	return mtuLimit
 }
 
 // initResolverRecheckMeta initializes metadata for resolver health monitoring.

@@ -26,7 +26,6 @@ type ClientContext interface {
 
 	// Stream Management
 	HandleStreamPacket(packet VpnProto.Packet) error
-	HandlePackedControlBlocks(payload []byte) error
 
 	// Session Management
 	HandleSessionReject(packet VpnProto.Packet) error
@@ -39,8 +38,10 @@ type ClientContext interface {
 	HandleDNSQueryAck(packet VpnProto.Packet) error
 	HandleDNSQueryRes(packet VpnProto.Packet) error
 
-	// Error Management
-	HandleServerDrop(packet VpnProto.Packet) error
+	// SOCKS5 Management
+	HandleSocksConnected(packet VpnProto.Packet) error
+	HandleSocksFailure(packet VpnProto.Packet) error
+	HandleSocksControlAck(packet VpnProto.Packet) error
 }
 
 // HandlerFunc is the signature for all packet type handlers.
