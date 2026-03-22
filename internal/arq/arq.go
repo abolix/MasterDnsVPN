@@ -542,7 +542,7 @@ func (a *ARQ) ioLoop() {
 				CompressionType: a.compressionType,
 			}
 			a.mu.Unlock()
-			a.enqueuer.PushTXPacket(3, Enums.PACKET_STREAM_DATA, sn, 0, 0, a.compressionType, chunk)
+			a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA), Enums.PACKET_STREAM_DATA, sn, 0, 0, a.compressionType, chunk)
 			offset += a.mtu
 		}
 	}
@@ -617,7 +617,7 @@ func (a *ARQ) ioLoop() {
 		}
 		a.mu.Unlock()
 
-		a.enqueuer.PushTXPacket(3, Enums.PACKET_STREAM_DATA, sn, 0, 0, a.compressionType, raw)
+		a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA), Enums.PACKET_STREAM_DATA, sn, 0, 0, a.compressionType, raw)
 	}
 
 	// Closure Handling Strategy
@@ -844,7 +844,7 @@ func (a *ARQ) ReceiveData(sn uint16, data []byte) {
 		a.mu.Unlock()
 
 		if emit {
-			a.enqueuer.PushTXPacket(0, Enums.PACKET_STREAM_DATA_ACK, sn, 0, 0, 0, nil)
+			a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA_ACK), Enums.PACKET_STREAM_DATA_ACK, sn, 0, 0, 0, nil)
 		}
 		return
 	}
@@ -866,7 +866,7 @@ func (a *ARQ) ReceiveData(sn uint16, data []byte) {
 	a.mu.Unlock()
 
 	a.flushReadyLocalData()
-	a.enqueuer.PushTXPacket(0, Enums.PACKET_STREAM_DATA_ACK, sn, 0, 0, 0, nil)
+	a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA_ACK), Enums.PACKET_STREAM_DATA_ACK, sn, 0, 0, 0, nil)
 	a.tryFinalizeRemoteEOF()
 }
 
@@ -890,6 +890,7 @@ func (a *ARQ) ReceiveAck(sn uint16) {
 
 func (a *ARQ) SendControlPacket(packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, payload []byte, priority int, trackForAck bool, customAckType *uint8) bool {
 	copyData := append([]byte(nil), payload...)
+	priority = Enums.NormalizePacketPriority(packetType, priority)
 	ok := a.enqueuer.PushTXPacket(priority, packetType, sequenceNum, fragmentID, totalFragments, 0, copyData)
 	if !ok {
 		return false
@@ -1037,7 +1038,7 @@ func (a *ARQ) checkRetransmits() {
 	a.mu.Unlock()
 
 	for _, j := range jobs {
-		a.enqueuer.PushTXPacket(1, Enums.PACKET_STREAM_RESEND, j.sn, 0, 0, j.compressionType, j.data)
+		a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_RESEND), Enums.PACKET_STREAM_RESEND, j.sn, 0, 0, j.compressionType, j.data)
 	}
 
 	if a.enableControlReliability {
@@ -1112,7 +1113,7 @@ func (a *ARQ) Abort(reason string, sendRst bool) {
 		a.mu.Unlock()
 		a.MarkRstSent(&sn)
 		ackType := uint8(Enums.PACKET_STREAM_RST_ACK)
-		a.SendControlPacket(Enums.PACKET_STREAM_RST, *a.rstSeqSent, 0, 0, nil, 0, a.enableControlReliability, &ackType)
+		a.SendControlPacket(Enums.PACKET_STREAM_RST, *a.rstSeqSent, 0, 0, nil, Enums.DefaultPacketPriority(Enums.PACKET_STREAM_RST), a.enableControlReliability, &ackType)
 	}
 
 	a.mu.Lock()
@@ -1135,7 +1136,7 @@ func (a *ARQ) Close(reason string, sendFin bool) {
 		a.mu.Unlock()
 		a.MarkFinSent(&sn)
 		ackType := uint8(Enums.PACKET_STREAM_FIN_ACK)
-		a.SendControlPacket(Enums.PACKET_STREAM_FIN, *a.finSeqSent, 0, 0, nil, 4, a.enableControlReliability, &ackType)
+		a.SendControlPacket(Enums.PACKET_STREAM_FIN, *a.finSeqSent, 0, 0, nil, Enums.DefaultPacketPriority(Enums.PACKET_STREAM_FIN), a.enableControlReliability, &ackType)
 		a.mu.Lock()
 	}
 

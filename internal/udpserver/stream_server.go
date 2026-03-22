@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"masterdnsvpn-go/internal/arq"
+	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/mlq"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
@@ -68,6 +69,8 @@ func (s *Stream_server) PushTXPacket(priority int, packetType uint8, sequenceNum
 	s.mu.Lock()
 	s.LastActivity = time.Now()
 	s.mu.Unlock()
+
+	priority = Enums.NormalizePacketPriority(packetType, priority)
 
 	// Dedup and track logic would go here if needed.
 	// For now, we use the MLQ's census for basic deduplication if we define a unique key.

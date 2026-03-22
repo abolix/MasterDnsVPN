@@ -109,13 +109,7 @@ func getTrackingKey(packetType uint8, sequenceNum uint16, fragmentID uint8) uint
 
 // getEffectivePriority maps packet types to priorities (0 is highest, 5 is lowest).
 func getEffectivePriority(packetType uint8, basePriority int) int {
-	// Level 0: Critical Control ACKs
-	// Level 1: Control Requests (SYN, FIN, RST)
-	// Level 2: DNS Responses
-	// Level 3: Normal Data
-	// Level 4: Pings
-	// Level 5: Idle/Low priority
-	return basePriority
+	return Enums.NormalizePacketPriority(packetType, basePriority)
 }
 
 type sessionRuntimeView struct {

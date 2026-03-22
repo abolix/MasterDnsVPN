@@ -230,7 +230,7 @@ func (c *Client) HandleSOCKS5Connect(ctx context.Context, conn net.Conn, addr st
 	sn := uint16(0) // Protocol usually uses 0 for SYN
 
 	for i, frag := range fragments {
-		arqObj.SendControlPacket(Enums.PACKET_SOCKS5_SYN, sn, uint8(i), total, frag, 0, true, nil)
+		arqObj.SendControlPacket(Enums.PACKET_SOCKS5_SYN, sn, uint8(i), total, frag, Enums.DefaultPacketPriority(Enums.PACKET_SOCKS5_SYN), true, nil)
 	}
 }
 
@@ -408,7 +408,7 @@ func (c *Client) HandleSocksConnected(packet VpnProto.Packet) error {
 	arqObj, err := c.getStreamARQ(packet.StreamID)
 	if err == nil {
 		arqObj.MarkSocksConnected()
-		arqObj.SendControlPacket(Enums.PACKET_SOCKS5_CONNECTED_ACK, packet.SequenceNum, packet.FragmentID, packet.TotalFragments, nil, 0, false, nil)
+		arqObj.SendControlPacket(Enums.PACKET_SOCKS5_CONNECTED_ACK, packet.SequenceNum, packet.FragmentID, packet.TotalFragments, nil, Enums.DefaultPacketPriority(Enums.PACKET_SOCKS5_CONNECTED_ACK), false, nil)
 	}
 
 	c.log.Infof("🔌 <green>Socks5 successfully connected for stream %d</green>", packet.StreamID)
@@ -429,7 +429,7 @@ func (c *Client) HandleSocksFailure(packet VpnProto.Packet) error {
 
 	arqObj.MarkSocksFailed(packet.PacketType)
 	ackType := packet.PacketType + 1
-	arqObj.SendControlPacket(ackType, packet.SequenceNum, packet.FragmentID, packet.TotalFragments, nil, 0, false, nil)
+	arqObj.SendControlPacket(ackType, packet.SequenceNum, packet.FragmentID, packet.TotalFragments, nil, Enums.DefaultPacketPriority(ackType), false, nil)
 	return nil
 }
 

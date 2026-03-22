@@ -163,9 +163,7 @@ func (s *Stream_client) PushTXPacket(priority int, packetType uint8, sequenceNum
 	key := getTrackingKey(packetType, sequenceNum, fragmentID)
 
 	// Delegate to MLQ (Mechanism)
-	if priority < 0 || priority >= 6 {
-		priority = 3 // Default
-	}
+	priority = Enums.NormalizePacketPriority(packetType, priority)
 
 	// Skip Ping packets if the queue is already congested (prevent bloat)
 	if packetType == Enums.PACKET_PING && s.txQueue != nil && s.txQueue.Size() > 200 {

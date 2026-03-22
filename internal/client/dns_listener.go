@@ -295,6 +295,6 @@ func (c *Client) dispatchDNSQueryToTunnel(query []byte) {
 		fragID := uint8(i)
 
 		// Send via ARQ as a control packet
-		arqObj.SendControlPacket(Enums.PACKET_DNS_QUERY_REQ, sn, fragID, total, frag, 3, true, nil)
+		arqObj.SendControlPacket(Enums.PACKET_DNS_QUERY_REQ, sn, fragID, total, frag, Enums.DefaultPacketPriority(Enums.PACKET_DNS_QUERY_REQ), true, nil)
 	}
 }
