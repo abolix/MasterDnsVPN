@@ -1,4 +1,4 @@
-﻿# MasterDnsVPN Client
+# MasterDnsVPN Client
 # Author: MasterkinG32
 # Github: https://github.com/masterking32
 # Year: 2026
@@ -3216,18 +3216,24 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 bound_addrs = []
                 for sock in server.sockets or []:
                     try:
-                        bound_addrs.append(str(sock.getsockname()))
+                        bound_addrs.append(sock.getsockname())
                     except Exception:
                         pass
                 if bound_addrs:
-                    self.logger.info(
-                        f"<cyan>Local listener sockets: {', '.join(bound_addrs)}</cyan>"
-                    )
+                    host, port = bound_addrs[0]
+                    if host in ("0.0.0.0", "::"):
+                        self.logger.info(
+                            f"<cyan>Listening on port <yellow>{port}</yellow> (local: <yellow>127.0.0.1:{port}</yellow>, network: <yellow>0.0.0.0:{port}</yellow>)</cyan>"
+                        )
+                    else:
+                        self.logger.info(
+                            f"<cyan>Listening on <yellow>{host}:{port}</yellow></cyan>"
+                        )
             except Exception:
                 pass
 
             if self.protocol_type == "SOCKS5":
-                if self.config.get("SOCKS5_USER") and self.config.get("SOCKS5_PASS"):
+                if self.socks5_auth and self.config.get("SOCKS5_USER") and self.config.get("SOCKS5_PASS"):
                     self.logger.info(
                         f"<green>SOCKS5 Proxy started on <cyan>{listen_port}</cyan> with Authentication. Username: <red>{self.config.get('SOCKS5_USER')}</red></green>"
                     )
