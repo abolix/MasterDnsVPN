@@ -178,7 +178,7 @@ func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
 	default:
 		// Handle generic control ACKs (acks to our SYN, etc.)
 		arqObj.ReceiveControlAck(packet.PacketType, packet.SequenceNum, packet.FragmentID)
-		if packet.PacketType == Enums.PACKET_STREAM_RST_ACK {
+		if packet.PacketType == Enums.PACKET_STREAM_RST_ACK || packet.PacketType == Enums.PACKET_STREAM_FIN_ACK {
 			if s.StatusValue() == streamStatusCancelled || arqObj.IsClosed() {
 				c.removeStream(packet.StreamID)
 			}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	Enums "masterdnsvpn-go/internal/enums"
+	"masterdnsvpn-go/internal/logger"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
@@ -100,17 +101,15 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 					SequenceNum:   orphanPacket.SequenceNum,
 				}
 
-				encoded, err := VpnProto.BuildEncodedAuto(opts, c.codec, c.cfg.CompressionMinSize)
-				if err != nil {
-					c.log.Errorf("Failed to encode orphan reset packet: %v", err)
-					continue
-				}
+			encoded, err := VpnProto.BuildEncodedAuto(opts, c.codec, c.cfg.CompressionMinSize)
+			if err != nil {
+				continue
+			}
 
-				dnsPacket, err := buildTunnelTXTQuestion(domain, encoded)
-				if err != nil {
-					c.log.Errorf("Failed to build orphan reset DNS question: %v", err)
-					continue
-				}
+			dnsPacket, err := buildTunnelTXTQuestion(domain, encoded)
+			if err != nil {
+				continue
+			}
 
 				select {
 				case c.txChannel <- asyncPacket{
@@ -224,7 +223,9 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 			for blocks < maxBlocks {
 				popped, poppedOk := selected.txQueue.PopAnyIf(func(p *clientStreamTXPacket) bool {
 					return VpnProto.IsPackableControlPacket(p.PacketType, len(p.Payload))
-				}, nil)
+				}, func(p *clientStreamTXPacket) uint32 {
+					return getTrackingKey(p.PacketType, p.SequenceNum, p.FragmentID)
+				})
 				if !poppedOk {
 					break
 				}
@@ -251,7 +252,9 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 					for blocks < maxBlocks {
 						popped, poppedOk := otherStream.txQueue.PopAnyIf(func(p *clientStreamTXPacket) bool {
 							return VpnProto.IsPackableControlPacket(p.PacketType, len(p.Payload))
-						}, nil)
+						}, func(p *clientStreamTXPacket) uint32 {
+							return getTrackingKey(p.PacketType, p.SequenceNum, p.FragmentID)
+						})
 						if !poppedOk {
 							break
 						}
@@ -322,13 +325,13 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 
 			encoded, err := VpnProto.BuildEncodedAuto(opts, c.codec, c.cfg.CompressionMinSize)
 			if err != nil {
-				c.log.Errorf("Failed to encode packet: %v", err)
+				c.log.Errorf("Failed to encode packet <magenta>|</magenta> <blue>Type</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Stream</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Seq</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Frag</blue>: <cyan>%d/%d</cyan> <magenta>|</magenta> <blue>Error</blue>: <cyan>%v</cyan>", Enums.PacketTypeName(item.PacketType), selected.StreamID, item.SequenceNum, item.FragmentID+1, max(1, int(item.TotalFragments)), err)
 				continue
 			}
 
 			dnsPacket, err := buildTunnelTXTQuestion(domain, encoded)
 			if err != nil {
-				c.log.Errorf("Failed to build DNS question: %v", err)
+				c.log.Errorf("Failed to build DNS question <magenta>|</magenta> <blue>Type</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Stream</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Seq</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Resolver</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Error</blue>: <cyan>%v</cyan>", Enums.PacketTypeName(item.PacketType), selected.StreamID, item.SequenceNum, domain, err)
 				continue
 			}
 
@@ -337,7 +340,6 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 			pkt.payload = dnsPacket
 
 			// Send to TX channel
-			c.log.Debugf("📤 <green>Dispatching packet (Type: %d) to %s:%d</green>", pkt.packetType, conn.Resolver, conn.ResolverPort)
 			select {
 			case c.txChannel <- pkt:
 			default:

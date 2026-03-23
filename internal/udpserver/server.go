@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -382,23 +383,20 @@ func (s *Server) handlePacket(packet []byte) []byte {
 			return nil
 		}
 
-		return buildNoDataResponse(packet)
+		return s.buildNoDataResponseLogged(packet, "request-parse-failed")
 	}
 
 	if !parsed.HasQuestion {
-		return buildNoDataResponse(packet)
+		return s.buildNoDataResponseLogged(packet, "request-has-no-question")
 	}
 
 	decision := s.domainMatcher.Match(parsed)
-	if s.debugLoggingEnabled() {
-		s.log.Debugf("\u231b <blue>Domain Match Decision</blue> <magenta>|</magenta> <blue>Name</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Action</blue>: <cyan>%v</cyan>", parsed.FirstQuestion.Name, decision.Action)
-	}
 	if decision.Action == domainMatcher.ActionProcess {
 		return s.handleTunnelCandidate(packet, parsed, decision)
 	}
 
 	if decision.Action == domainMatcher.ActionFormatError || decision.Action == domainMatcher.ActionNoData {
-		return buildNoDataResponseLite(packet, parsed)
+		return s.buildNoDataResponseLiteLogged(packet, parsed, "domain-match-no-data")
 	}
 
 	return nil
@@ -410,11 +408,7 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 		if s.debugLoggingEnabled() {
 			s.log.Debugf("\u26a0\ufe0f <yellow>VPN Proto Parse Failed</yellow> <magenta>|</magenta> <blue>Error</blue>: <cyan>%v</cyan>", err)
 		}
-		return buildNoDataResponseLite(packet, parsed)
-	}
-
-	if s.debugLoggingEnabled() {
-		s.log.Debugf("\U0001F4E5 <blue>Dispatching packet</blue> <magenta>|</magenta> <blue>Type</blue>: <cyan>%d</cyan>", vpnPacket.PacketType)
+		return s.buildNoDataResponseLiteLogged(packet, parsed, "vpn-proto-parse-failed")
 	}
 
 	if vpnPacket.PacketType == Enums.PACKET_SESSION_CLOSE {
@@ -429,7 +423,7 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 		}
 
 		if !s.handlePostSessionPacket(decision, vpnPacket, validation.record) {
-			return buildNoDataResponseLite(packet, parsed)
+			return s.buildNoDataResponseLiteLogged(packet, parsed, fmt.Sprintf("post-session-unhandled-%s", Enums.PacketTypeName(vpnPacket.PacketType)))
 		}
 
 		return s.serveQueuedOrPong(packet, decision.RequestName, validation.record, time.Now())
@@ -443,7 +437,7 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 	case Enums.PACKET_SESSION_INIT:
 		return s.handleSessionInitRequest(packet, decision, vpnPacket)
 	default:
-		return buildNoDataResponseLite(packet, parsed)
+		return s.buildNoDataResponseLiteLogged(packet, parsed, fmt.Sprintf("pre-session-unhandled-%s", Enums.PacketTypeName(vpnPacket.PacketType)))
 	}
 }
 
@@ -464,6 +458,18 @@ func (s *Server) handlePostSessionPacket(decision domainMatcher.Decision, vpnPac
 		return s.handleStreamDataRequest(vpnPacket, sessionRecord)
 	case Enums.PACKET_STREAM_DATA_ACK, Enums.PACKET_STREAM_FIN_ACK, Enums.PACKET_STREAM_RST_ACK, Enums.PACKET_STREAM_SYN_ACK:
 		return s.handleStreamAckPacket(vpnPacket, sessionRecord)
+	case Enums.PACKET_SOCKS5_CONNECTED_ACK,
+		Enums.PACKET_SOCKS5_CONNECT_FAIL_ACK,
+		Enums.PACKET_SOCKS5_RULESET_DENIED_ACK,
+		Enums.PACKET_SOCKS5_NETWORK_UNREACHABLE_ACK,
+		Enums.PACKET_SOCKS5_HOST_UNREACHABLE_ACK,
+		Enums.PACKET_SOCKS5_CONNECTION_REFUSED_ACK,
+		Enums.PACKET_SOCKS5_TTL_EXPIRED_ACK,
+		Enums.PACKET_SOCKS5_COMMAND_UNSUPPORTED_ACK,
+		Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED_ACK,
+		Enums.PACKET_SOCKS5_AUTH_FAILED_ACK,
+		Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE_ACK:
+		return s.handleSocksAckPacket(vpnPacket, sessionRecord)
 	case Enums.PACKET_DNS_QUERY_REQ:
 		return s.handleDNSQueryRequest(decision, vpnPacket, sessionRecord)
 	case Enums.PACKET_DNS_QUERY_RES_ACK:
@@ -802,7 +808,7 @@ func (s *Server) serveQueuedOrPong(questionPacket []byte, requestName string, re
 
 	// New MLQ-based Round-Robin dispatcher
 	if pkt, ok := s.dequeueSessionResponse(sessionID, now); ok {
-		if s.log != nil && s.debugLoggingEnabled() {
+		if s.log != nil && s.debugLoggingEnabled() && shouldLogServerPacketFlow(pkt.PacketType) {
 			s.log.Debugf(
 				"\U0001F4E4 <blue>Serving Queued Packet</blue> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Type</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Stream</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Seq</blue>: <cyan>%d</cyan>",
 				sessionID,
@@ -1208,18 +1214,21 @@ func (s *Server) handlePackedControlBlocksRequest(vpnPacket VpnProto.Packet, ses
 	}
 
 	handled := false
+	sawBlock := false
 	VpnProto.ForEachPackedControlBlock(vpnPacket.Payload, func(packetType uint8, streamID uint16, sequenceNum uint16, fragmentID uint8, totalFragments uint8) bool {
 		if packetType == Enums.PACKET_PACKED_CONTROL_BLOCKS {
 			return true
 		}
+		sawBlock = true
 		block := VpnProto.Packet{
 			SessionID:      vpnPacket.SessionID,
 			SessionCookie:  vpnPacket.SessionCookie,
 			PacketType:     packetType,
 			StreamID:       streamID,
-			HasStreamID:    streamID != 0,
+			// Packed blocks always carry explicit stream/sequence fields, and seq=0 is valid.
+			HasStreamID:    true,
 			SequenceNum:    sequenceNum,
-			HasSequenceNum: sequenceNum != 0,
+			HasSequenceNum: true,
 			FragmentID:     fragmentID,
 			TotalFragments: totalFragments,
 		}
@@ -1232,7 +1241,7 @@ func (s *Server) handlePackedControlBlocksRequest(vpnPacket VpnProto.Packet, ses
 		}
 		return true
 	})
-	return handled
+	return handled || sawBlock
 }
 
 func (s *Server) handlePackedPostSessionBlock(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
@@ -1243,6 +1252,18 @@ func (s *Server) handlePackedPostSessionBlock(vpnPacket VpnProto.Packet, session
 		return s.handleDNSQueryResponseAck(vpnPacket, sessionRecord)
 	case Enums.PACKET_STREAM_DATA_ACK, Enums.PACKET_STREAM_FIN_ACK, Enums.PACKET_STREAM_RST_ACK, Enums.PACKET_STREAM_SYN_ACK:
 		return s.handleStreamAckPacket(vpnPacket, sessionRecord)
+	case Enums.PACKET_SOCKS5_CONNECTED_ACK,
+		Enums.PACKET_SOCKS5_CONNECT_FAIL_ACK,
+		Enums.PACKET_SOCKS5_RULESET_DENIED_ACK,
+		Enums.PACKET_SOCKS5_NETWORK_UNREACHABLE_ACK,
+		Enums.PACKET_SOCKS5_HOST_UNREACHABLE_ACK,
+		Enums.PACKET_SOCKS5_CONNECTION_REFUSED_ACK,
+		Enums.PACKET_SOCKS5_TTL_EXPIRED_ACK,
+		Enums.PACKET_SOCKS5_COMMAND_UNSUPPORTED_ACK,
+		Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED_ACK,
+		Enums.PACKET_SOCKS5_AUTH_FAILED_ACK,
+		Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE_ACK:
+		return s.handleSocksAckPacket(vpnPacket, sessionRecord)
 	case Enums.PACKET_STREAM_FIN:
 		return s.handleStreamFinRequest(vpnPacket, sessionRecord)
 	case Enums.PACKET_STREAM_RST:
@@ -1496,7 +1517,7 @@ func (s *Server) handleDNSQueryRequest(decision domainMatcher.Decision, vpnPacke
 		totalFragments = 1
 	}
 	now := time.Now()
-	if s.log != nil {
+	if s.log != nil && totalFragments == 1 {
 		s.log.Debugf(
 			"\U0001F4E8 <green>Tunnel DNS Query Received</green> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Seq</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Frag</blue>: <cyan>%d/%d</cyan> <magenta>|</magenta> <blue>Domain</blue>: <cyan>%s</cyan>",
 			vpnPacket.SessionID,
@@ -1518,7 +1539,7 @@ func (s *Server) handleDNSQueryRequest(decision domainMatcher.Decision, vpnPacke
 		return true
 	}
 	if !ready {
-		if s.log != nil {
+		if s.log != nil && totalFragments == 1 {
 			s.log.Debugf(
 				"\U0001F9E9 <green>Tunnel DNS Fragment Buffered</green> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Seq</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Frag</blue>: <cyan>%d/%d</cyan>",
 				vpnPacket.SessionID,
@@ -1731,6 +1752,25 @@ func (s *Server) handleStreamAckPacket(vpnPacket VpnProto.Packet, sessionRecord 
 		}
 	}
 
+	return true
+}
+
+func (s *Server) handleSocksAckPacket(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
+	if sessionRecord == nil || !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 {
+		return false
+	}
+
+	record, ok := s.sessions.Get(vpnPacket.SessionID)
+	if !ok {
+		return false
+	}
+
+	stream, exists := record.getStream(vpnPacket.StreamID)
+	if !exists || stream == nil || stream.ARQ == nil {
+		return s.enqueueMissingStreamReset(record, vpnPacket)
+	}
+
+	stream.ARQ.ReceiveControlAck(vpnPacket.PacketType, vpnPacket.SequenceNum, vpnPacket.FragmentID)
 	return true
 }
 

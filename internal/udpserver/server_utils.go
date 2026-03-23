@@ -9,6 +9,7 @@ package udpserver
 
 import (
 	"encoding/binary"
+	"fmt"
 
 	"masterdnsvpn-go/internal/compression"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
@@ -18,6 +19,56 @@ import (
 
 func (s *Server) debugLoggingEnabled() bool {
 	return s != nil && s.log != nil && s.log.Enabled(logger.LevelDebug)
+}
+
+func summarizeQName(name string) string {
+	if len(name) <= 96 {
+		return name
+	}
+	return fmt.Sprintf("%s...%s", name[:48], name[len(name)-24:])
+}
+
+func shouldLogServerPacketFlow(packetType uint8) bool {
+	switch packetType {
+	case Enums.PACKET_STREAM_SYN,
+		Enums.PACKET_STREAM_SYN_ACK,
+		Enums.PACKET_STREAM_FIN,
+		Enums.PACKET_STREAM_FIN_ACK,
+		Enums.PACKET_STREAM_RST,
+		Enums.PACKET_STREAM_RST_ACK,
+		Enums.PACKET_SOCKS5_SYN,
+		Enums.PACKET_SOCKS5_SYN_ACK,
+		Enums.PACKET_SOCKS5_CONNECTED,
+		Enums.PACKET_SOCKS5_CONNECTED_ACK,
+		Enums.PACKET_SOCKS5_CONNECT_FAIL,
+		Enums.PACKET_SOCKS5_CONNECT_FAIL_ACK,
+		Enums.PACKET_SOCKS5_RULESET_DENIED,
+		Enums.PACKET_SOCKS5_RULESET_DENIED_ACK,
+		Enums.PACKET_SOCKS5_NETWORK_UNREACHABLE,
+		Enums.PACKET_SOCKS5_NETWORK_UNREACHABLE_ACK,
+		Enums.PACKET_SOCKS5_HOST_UNREACHABLE,
+		Enums.PACKET_SOCKS5_HOST_UNREACHABLE_ACK,
+		Enums.PACKET_SOCKS5_CONNECTION_REFUSED,
+		Enums.PACKET_SOCKS5_CONNECTION_REFUSED_ACK,
+		Enums.PACKET_SOCKS5_TTL_EXPIRED,
+		Enums.PACKET_SOCKS5_TTL_EXPIRED_ACK,
+		Enums.PACKET_SOCKS5_COMMAND_UNSUPPORTED,
+		Enums.PACKET_SOCKS5_COMMAND_UNSUPPORTED_ACK,
+		Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED,
+		Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED_ACK,
+		Enums.PACKET_SOCKS5_AUTH_FAILED,
+		Enums.PACKET_SOCKS5_AUTH_FAILED_ACK,
+		Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE,
+		Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE_ACK,
+		Enums.PACKET_DNS_QUERY_REQ,
+		Enums.PACKET_DNS_QUERY_REQ_ACK,
+		Enums.PACKET_DNS_QUERY_RES,
+		Enums.PACKET_DNS_QUERY_RES_ACK,
+		Enums.PACKET_ERROR_DROP:
+		return true
+	default:
+		return false
+	}
 }
 
 func buildNoDataResponse(packet []byte) []byte {
@@ -34,6 +85,14 @@ func buildNoDataResponseLite(packet []byte, parsed DnsParser.LitePacket) []byte 
 		return nil
 	}
 	return response
+}
+
+func (s *Server) buildNoDataResponseLogged(packet []byte, reason string) []byte {
+	return buildNoDataResponse(packet)
+}
+
+func (s *Server) buildNoDataResponseLiteLogged(packet []byte, parsed DnsParser.LitePacket, reason string) []byte {
+	return buildNoDataResponseLite(packet, parsed)
 }
 
 func isClosedStreamAwarePacketType(packetType uint8) bool {

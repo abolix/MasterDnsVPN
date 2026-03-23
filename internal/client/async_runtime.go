@@ -17,7 +17,6 @@ import (
 
 	"masterdnsvpn-go/internal/client/handlers"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
-	"masterdnsvpn-go/internal/logger"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
@@ -265,9 +264,6 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
 
 	// 3. Queue deterministic non-data ACKs before any handler logic runs.
 	if handled := c.preprocessInboundPacket(vpnPacket); handled {
-		if c.log.Enabled(logger.LevelDebug) {
-			c.log.Debugf("\U0001F4E5 <cyan>Received Validated VPN Packet (Type: %d)</cyan>", vpnPacket.PacketType)
-		}
 		return
 	}
 
@@ -276,9 +272,6 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
 		c.log.Warnf("\U0001F6A8 <red>Handler execution failed: %v</red>", err)
 	}
 
-	if c.log.Enabled(logger.LevelDebug) {
-		c.log.Debugf("\U0001F4E5 <cyan>Received Validated VPN Packet (Type: %d)</cyan>", vpnPacket.PacketType)
-	}
 }
 
 // SendBurstPacket adds a packet to the transmission queue.
@@ -298,7 +291,6 @@ func (c *Client) SendBurstPacket(conn Connection, payload []byte, packetType uin
 	})
 
 	if err != nil {
-		c.log.Errorf("Failed to build burst DNS query: %v", err)
 		return
 	}
 

@@ -20,6 +20,7 @@ type Logger struct {
 	name           string
 	level          int
 	base           *log.Logger
+	fileLogger     *log.Logger
 	color          bool
 	appNameText    string
 	appNameColored string
@@ -74,19 +75,21 @@ func New(name, rawLevel string) *Logger {
 
 func NewWithFile(name, rawLevel, filePath string) *Logger {
 	appName := "[" + name + "]"
-	var writer io.Writer = os.Stdout
+	var consoleWriter io.Writer = os.Stdout
+	var fileLogger *log.Logger
 
 	if filePath != "" {
 		f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err == nil {
-			writer = io.MultiWriter(os.Stdout, f)
+			fileLogger = log.New(f, "", log.LstdFlags)
 		}
 	}
 
 	return &Logger{
 		name:           name,
 		level:          parseLevel(rawLevel),
-		base:           log.New(writer, "", log.LstdFlags),
+		base:           log.New(consoleWriter, "", log.LstdFlags),
+		fileLogger:     fileLogger,
 		color:          shouldUseColor(),
 		appNameText:    appName,
 		appNameColored: "\x1b[36m" + appName + "\x1b[0m",
@@ -116,18 +119,32 @@ func (l *Logger) logf(level int, format string, args ...any) {
 		msg = fmt.Sprintf(format, args...)
 	}
 
-	appName := l.appNameText
-	levelText := plainLevelTexts[level]
-
-	if l.color {
-		if strings.IndexByte(msg, '<') >= 0 {
-			msg = renderColorTags(msg)
-		}
-		appName = l.appNameColored
-		levelText = coloredLevelTexts[level]
+	plainMsg := msg
+	if strings.IndexByte(msg, '<') >= 0 {
+		plainMsg = stripColorTags(msg)
 	}
 
-	l.base.Print(appName, " ", levelText, " ", msg)
+	if l.fileLogger != nil {
+		l.fileLogger.Print(plainLevelTexts[level], " ", plainMsg)
+	}
+
+	if l.base != nil {
+		appName := l.appNameText
+		levelText := plainLevelTexts[level]
+		finalMsg := plainMsg
+
+		if l.color {
+			if strings.IndexByte(msg, '<') >= 0 {
+				finalMsg = renderColorTags(msg)
+			} else {
+				finalMsg = msg
+			}
+			appName = l.appNameColored
+			levelText = coloredLevelTexts[level]
+		}
+
+		l.base.Print(appName, " ", levelText, " ", finalMsg)
+	}
 }
 
 func (l *Logger) Debugf(format string, args ...any) { l.logf(levelDebug, format, args...) }
@@ -137,6 +154,47 @@ func (l *Logger) Errorf(format string, args ...any) { l.logf(levelError, format,
 
 func (l *Logger) Enabled(level int) bool {
 	return l != nil && level >= l.level
+}
+
+func stripColorTags(text string) string {
+	start := strings.IndexByte(text, '<')
+	if start == -1 {
+		return text
+	}
+
+	var b strings.Builder
+	b.Grow(len(text))
+
+	for i := 0; i < len(text); {
+		if text[i] != '<' {
+			next := strings.IndexByte(text[i:], '<')
+			if next == -1 {
+				b.WriteString(text[i:])
+				break
+			}
+			b.WriteString(text[i : i+next])
+			i += next
+			continue
+		}
+
+		end := strings.IndexByte(text[i:], '>')
+		if end == -1 {
+			b.WriteString(text[i:])
+			break
+		}
+
+		rawTag := text[i : i+end+1]
+		tag := strings.ToLower(rawTag)
+		if _, _, ok := parseColorTag(tag); ok {
+			i += end + 1
+			continue
+		}
+
+		b.WriteString(rawTag)
+		i += end + 1
+	}
+
+	return b.String()
 }
 
 func shouldUseColor() bool {
