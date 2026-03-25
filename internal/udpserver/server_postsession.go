@@ -340,6 +340,7 @@ func (s *Server) handleSOCKS5SynRequest(vpnPacket VpnProto.Packet, sessionRecord
 	if !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 || !vpnPacket.HasSequenceNum || sessionRecord == nil {
 		return false
 	}
+
 	record, ok := s.sessions.Get(vpnPacket.SessionID)
 	if !ok {
 		return false

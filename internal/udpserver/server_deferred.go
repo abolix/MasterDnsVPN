@@ -218,27 +218,8 @@ func (s *Server) processDeferredStreamData(vpnPacket VpnProto.Packet, sessionRec
 	if !ok {
 		return
 	}
-	now := time.Now()
-	totalFragments := vpnPacket.TotalFragments
-	if totalFragments == 0 {
-		totalFragments = 1
-	}
-
-	assembledPayload, ready, complete := s.collectStreamDataFragments(vpnPacket, now)
-	if complete {
-		_ = s.queueSessionPacket(vpnPacket.SessionID, VpnProto.Packet{
-			PacketType:  Enums.PACKET_STREAM_DATA_ACK,
-			StreamID:    vpnPacket.StreamID,
-			SequenceNum: vpnPacket.SequenceNum,
-		})
-		return
-	}
-	if !ready {
-		return
-	}
-
 	stream := record.getOrCreateStream(vpnPacket.StreamID, s.streamARQConfig(false, record.DownloadCompression), nil, s.log)
-	stream.ARQ.ReceiveData(vpnPacket.SequenceNum, assembledPayload)
+	stream.ARQ.ReceiveData(vpnPacket.SequenceNum, vpnPacket.Payload)
 }
 
 func (s *Server) mapSOCKSConnectError(err error) uint8 {
