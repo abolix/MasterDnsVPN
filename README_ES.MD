@@ -91,7 +91,25 @@ Podés usar este proyecto de dos maneras:
 1. Usar binarios precompilados
 2. Compilar y ejecutar directamente desde el código fuente en **Go**
 
-### Paso 2.1: Usar binarios precompilados (recomendado ✅)
+### Paso 2.1: Configuración rápida del servidor en Linux 🐧
+
+Si querés configurar el servidor en una máquina Linux, la forma más simple es usar el script de instalación automática. Ejecutá este comando en la terminal de tu servidor:
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh)
+```
+
+Este comando descarga el instalador desde GitHub y hace automáticamente la instalación y configuración del servidor. Cuando termina, el servidor arranca y muestra la **clave de cifrado** en los logs de la terminal. Copiala, porque la vas a necesitar en el cliente. También queda guardada en `encrypt_key.txt` junto al ejecutable del servidor.
+
+> ⚠️ **Nota importante 1:** Antes de ejecutar este script, debés tener un dominio propio y haber completado la configuración DNS de la Sección 1.
+>
+> ⚠️ **Nota importante 2:** Este script instala solo el servidor Linux. Para ejecutar el cliente en tu equipo, usá el Paso 2.2.
+>
+> ⚠️ **Nota importante 3:** También podés usar este script para actualizar el servidor. Si sale una versión nueva, volver a ejecutarlo actualiza la instalación.
+
+---
+
+### Paso 2.2: Usar binarios precompilados (recomendado ✅)
 
 Para mayor comodidad, los binarios del cliente y del servidor se publican en la página de releases. Descargá la versión correcta para tu sistema operativo y extraela.
 
@@ -109,6 +127,8 @@ Para mayor comodidad, los binarios del cliente y del servidor se publican en la 
 
 #### Enlaces de descarga del servidor 📤
 
+*(Usá estos binarios si no querés usar el instalador automático de Linux.)*
+
 | Sistema operativo | Arquitectura | Adecuado para | Descarga directa |
 | :--- | :--- | :--- | :--- |
 | Windows 🪟 | `AMD64` (64-bit) | Windows Server, Windows 10 y 11 | [Descargar servidor Windows ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Windows_AMD64.zip) |
@@ -119,7 +139,7 @@ Para mayor comodidad, los binarios del cliente y del servidor se publican en la 
 
 ---
 
-### Paso 2.2: Preparar y ejecutar en Linux 🗂️
+### Paso 2.2.1: Preparar y ejecutar en Linux 🗂️
 
 Después de descargar el ZIP en Linux:
 

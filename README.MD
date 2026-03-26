@@ -91,7 +91,25 @@ You can run this project in two ways:
 1. Use the prebuilt binaries
 2. Build and run directly from the **Go** source
 
-### Step 2.1: Use the Prebuilt Binaries (Recommended ✅)
+### Step 2.1: Quick Linux Server Setup 🐧
+
+If you want to set up the server on a Linux machine, the easiest way is using the automated installation script. Run the following command in your server terminal:
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh)
+```
+
+This command downloads the installer from GitHub and performs the server installation and configuration automatically. When the setup finishes, the server starts and prints the **Encryption Key** in the terminal logs. Copy this key, because you will need it on the client side. It is also stored in `encrypt_key.txt` next to the server executable.
+
+> ⚠️ **Important Note 1:** Before running this script, you must own a domain and complete the DNS setup from Section 1.
+>
+> ⚠️ **Important Note 2:** This script installs the Linux server only. To run the client on your own machine, use Step 2.2 below.
+>
+> ⚠️ **Important Note 3:** You can also use this script for updates. Running it again after a new release will update the server automatically.
+
+---
+
+### Step 2.2: Use the Prebuilt Binaries (Recommended ✅)
 
 For convenience, the client and server binaries are published in the release page. Download the correct build for your operating system and extract it.
 
@@ -109,6 +127,8 @@ For convenience, the client and server binaries are published in the release pag
 
 #### Server Download Links 📤
 
+*(Use these builds when you do not want to use the automated Linux installer.)*
+
 | Operating System | Architecture | Suitable For | Direct Download |
 | :--- | :--- | :--- | :--- |
 | Windows 🪟 | `AMD64` (64-bit) | Windows Server, Windows 10 and 11 | [Download Windows Server ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Windows_AMD64.zip) |
@@ -119,7 +139,7 @@ For convenience, the client and server binaries are published in the release pag
 
 ---
 
-### Step 2.2: Prepare and Run on Linux 🗂️
+### Step 2.2.1: Prepare and Run on Linux 🗂️
 
 After downloading the ZIP file on Linux:
 
