@@ -9,7 +9,6 @@ package udpserver
 
 import (
 	"encoding/binary"
-	"sort"
 	"time"
 
 	"masterdnsvpn-go/internal/arq"
@@ -261,22 +260,22 @@ func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnPro
 	rrStreamID := record.RRStreamID
 	record.mu.Unlock()
 
-	record.StreamsMu.RLock()
-	streamCount := len(record.ActiveStreams)
-	ids := make([]int32, 0, streamCount+1)
-	for _, id := range record.ActiveStreams {
-		ids = append(ids, int32(id))
-	}
-	record.StreamsMu.RUnlock()
-
+	activeIDs := record.activeStreamIDsSnapshot()
+	var idsBuf [32]int32
+	ids := activeIDs
 	if record.OrphanQueue != nil && record.OrphanQueue.Size() > 0 {
+		if len(activeIDs)+1 <= len(idsBuf) {
+			ids = idsBuf[:0]
+		} else {
+			ids = make([]int32, 0, len(activeIDs)+1)
+		}
 		ids = append(ids, -1)
+		ids = append(ids, activeIDs...)
 	}
+
 	if len(ids) == 0 {
 		return nil, false
 	}
-
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 
 	startIdx := 0
 	for i, id := range ids {
@@ -348,6 +347,9 @@ func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnPro
 			}
 			record.mu.Unlock()
 			pkt := vpnPacketFromTX(item, selectedStreamID)
+			if id != -1 {
+				putTXPacketToPool(item)
+			}
 			return &pkt, true
 		}
 	}
@@ -404,15 +406,12 @@ func (s *Server) packControlBlocks(record *sessionRecord, first *serverStreamTXP
 	payload = VpnProto.AppendPackedControlBlock(payload, first.PacketType, initialStreamID, first.SequenceNum, first.FragmentID, first.TotalFragments)
 	blocks := 1
 
-	record.StreamsMu.RLock()
-	ids := make([]int32, 0, len(record.ActiveStreams)+1)
+	activeIDs := record.activeStreamIDsSnapshot()
+	ids := make([]int32, 0, len(activeIDs)+1)
 	if record.OrphanQueue != nil && record.OrphanQueue.Size() > 0 {
 		ids = append(ids, -1)
 	}
-	for _, sid := range record.ActiveStreams {
-		ids = append(ids, int32(sid))
-	}
-	record.StreamsMu.RUnlock()
+	ids = append(ids, activeIDs...)
 
 	orderedIDs := make([]int32, 0, len(ids))
 	orderedIDs = append(orderedIDs, initialID)
@@ -429,7 +428,7 @@ func (s *Server) packControlBlocks(record *sessionRecord, first *serverStreamTXP
 
 		if id == -1 {
 			for blocks < limit {
-				popped, ok := record.OrphanQueue.PopAnyIf(func(p VpnProto.Packet) bool {
+				popped, ok := record.OrphanQueue.PopAnyIf(2, func(p VpnProto.Packet) bool {
 					return VpnProto.IsPackableControlPacket(p.PacketType, 0)
 				}, func(p VpnProto.Packet) uint64 {
 					return Enums.PacketTypeStreamKey(p.StreamID, p.PacketType)
@@ -448,7 +447,7 @@ func (s *Server) packControlBlocks(record *sessionRecord, first *serverStreamTXP
 				continue
 			}
 			for blocks < limit {
-				popped, ok := stream.TXQueue.PopAnyIf(func(p *serverStreamTXPacket) bool {
+				popped, ok := stream.TXQueue.PopAnyIf(2, func(p *serverStreamTXPacket) bool {
 					return VpnProto.IsPackableControlPacket(p.PacketType, len(p.Payload))
 				}, func(p *serverStreamTXPacket) uint64 {
 					return Enums.PacketIdentityKey(uint16(id), p.PacketType, p.SequenceNum, p.FragmentID)
@@ -459,13 +458,21 @@ func (s *Server) packControlBlocks(record *sessionRecord, first *serverStreamTXP
 				stream.NoteTXPacketDequeued(popped)
 				payload = VpnProto.AppendPackedControlBlock(payload, popped.PacketType, uint16(id), popped.SequenceNum, popped.FragmentID, popped.TotalFragments)
 				blocks++
+				putTXPacketToPool(popped)
 			}
 		}
 	}
 
 	if blocks <= 1 {
 		pkt := vpnPacketFromTX(first, initialStreamID)
+		if initialID != -1 {
+			putTXPacketToPool(first)
+		}
 		return &pkt
+	}
+
+	if initialID != -1 {
+		putTXPacketToPool(first)
 	}
 
 	return &VpnProto.Packet{

@@ -56,6 +56,9 @@ type sessionRecord struct {
 	// New fields for ARQ refactor
 	Streams                         map[uint16]*Stream_server
 	ActiveStreams                   []uint16 // Sorted list of active stream IDs for Round-Robin
+	activeStreamSetVersion         uint64
+	activeStreamSnapshotIDs        []int32
+	activeStreamSnapshotVersion    uint64
 	RRStreamID                      int32    // Last served stream ID for RR
 	EnqueueSeq                      uint64   // Global sequence for FIFO inside same priority
 	StreamQueueCap                  int
@@ -666,6 +669,7 @@ func (r *sessionRecord) getOrCreateStream(streamID uint16, arqConfig arq.Config,
 			r.ActiveStreams = append(r.ActiveStreams[:insertAt+1], r.ActiveStreams[insertAt:]...)
 			r.ActiveStreams[insertAt] = streamID
 		}
+		r.markActiveStreamsChangedLocked()
 	}
 
 	return s
@@ -817,9 +821,43 @@ func (r *sessionRecord) removeActiveStreamLocked(streamID uint16) {
 	for i, id := range r.ActiveStreams {
 		if id == streamID {
 			r.ActiveStreams = append(r.ActiveStreams[:i], r.ActiveStreams[i+1:]...)
+			r.markActiveStreamsChangedLocked()
 			break
 		}
 	}
+}
+
+func (r *sessionRecord) markActiveStreamsChangedLocked() {
+	r.activeStreamSetVersion++
+}
+
+func (r *sessionRecord) activeStreamIDsSnapshot() []int32 {
+	if r == nil || r.isClosed() {
+		return nil
+	}
+
+	r.StreamsMu.RLock()
+	version := r.activeStreamSetVersion
+	if version == r.activeStreamSnapshotVersion {
+		snapshot := r.activeStreamSnapshotIDs
+		r.StreamsMu.RUnlock()
+		return snapshot
+	}
+	r.StreamsMu.RUnlock()
+
+	r.StreamsMu.Lock()
+	defer r.StreamsMu.Unlock()
+
+	if r.activeStreamSetVersion != r.activeStreamSnapshotVersion {
+		snapshot := make([]int32, len(r.ActiveStreams))
+		for i, id := range r.ActiveStreams {
+			snapshot[i] = int32(id)
+		}
+		r.activeStreamSnapshotIDs = snapshot
+		r.activeStreamSnapshotVersion = r.activeStreamSetVersion
+	}
+
+	return r.activeStreamSnapshotIDs
 }
 
 func (r *sessionRecord) closeAllStreams(reason string) {
@@ -845,6 +883,7 @@ func (r *sessionRecord) closeAllStreams(reason string) {
 	r.StreamsMu.Lock()
 	clear(r.Streams)
 	r.ActiveStreams = r.ActiveStreams[:0]
+	r.markActiveStreamsChangedLocked()
 	r.StreamsMu.Unlock()
 
 	if r.OrphanQueue != nil {

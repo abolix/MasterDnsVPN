@@ -251,7 +251,7 @@ dispatchLoop:
 
 			if selected != nil {
 				for blocks < maxBlocks {
-					popped, poppedOK := selected.txQueue.PopAnyIf(func(p *clientStreamTXPacket) bool {
+					popped, poppedOK := selected.txQueue.PopAnyIf(2, func(p *clientStreamTXPacket) bool {
 						return VpnProto.IsPackableControlPacket(p.PacketType, len(p.Payload))
 					}, func(p *clientStreamTXPacket) uint64 {
 						return Enums.PacketIdentityKey(selected.StreamID, p.PacketType, p.SequenceNum, p.FragmentID)
@@ -266,7 +266,7 @@ dispatchLoop:
 				}
 			} else if selectedID == -1 {
 				for blocks < maxBlocks {
-					popped, poppedOK := c.orphanQueue.PopAnyIf(func(p VpnProto.Packet) bool {
+					popped, poppedOK := c.orphanQueue.PopAnyIf(2, func(p VpnProto.Packet) bool {
 						return VpnProto.IsPackableControlPacket(p.PacketType, 0)
 					}, func(p VpnProto.Packet) uint64 {
 						return Enums.PacketTypeStreamKey(p.StreamID, p.PacketType)
@@ -290,7 +290,7 @@ dispatchLoop:
 
 					if otherID == -1 {
 						for blocks < maxBlocks {
-							popped, poppedOK := c.orphanQueue.PopAnyIf(func(p VpnProto.Packet) bool {
+							popped, poppedOK := c.orphanQueue.PopAnyIf(2, func(p VpnProto.Packet) bool {
 								return VpnProto.IsPackableControlPacket(p.PacketType, 0)
 							}, func(p VpnProto.Packet) uint64 {
 								return Enums.PacketTypeStreamKey(p.StreamID, p.PacketType)
@@ -309,7 +309,7 @@ dispatchLoop:
 						continue
 					}
 					for blocks < maxBlocks {
-						popped, poppedOK := otherStream.txQueue.PopAnyIf(func(p *clientStreamTXPacket) bool {
+						popped, poppedOK := otherStream.txQueue.PopAnyIf(2, func(p *clientStreamTXPacket) bool {
 							return VpnProto.IsPackableControlPacket(p.PacketType, len(p.Payload))
 						}, func(p *clientStreamTXPacket) uint64 {
 							return Enums.PacketIdentityKey(uint16(otherID), p.PacketType, p.SequenceNum, p.FragmentID)

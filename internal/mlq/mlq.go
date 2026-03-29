@@ -286,7 +286,8 @@ func (m *MultiLevelQueue[T]) PopIf(priority int, predicate func(T) bool, keyExtr
 }
 
 // PopAnyIf retrieves the highest priority item that matches the given predicate, regardless of its priority.
-func (m *MultiLevelQueue[T]) PopAnyIf(predicate func(T) bool, keyExtractor func(T) uint64) (T, bool) {
+// To avoid scanning lower-priority elements (e.g. data packets when searching for control packets), use maxPriority.
+func (m *MultiLevelQueue[T]) PopAnyIf(maxPriority int, predicate func(T) bool, keyExtractor func(T) uint64) (T, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -299,6 +300,9 @@ func (m *MultiLevelQueue[T]) PopAnyIf(predicate func(T) bool, keyExtractor func(
 	tempMask := m.bitmask
 	for tempMask != 0 {
 		priority := bits.TrailingZeros16(tempMask)
+		if priority > maxPriority { // priority < 0 not possible
+			break
+		}
 		q := &m.queues[priority]
 
 		if len(q.Items) > 0 {

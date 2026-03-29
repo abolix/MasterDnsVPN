@@ -340,6 +340,50 @@ func TestDeactivateStreamRemovesClosedStreamFromRoundRobinAndClearsQueue(t *test
 	}
 }
 
+func TestSessionActiveStreamSnapshotUpdatesAfterMutations(t *testing.T) {
+	record := newTestSessionRecord(23)
+
+	record.getOrCreateStream(9, arq.Config{}, nil, nil)
+	record.getOrCreateStream(3, arq.Config{}, nil, nil)
+	record.getOrCreateStream(7, arq.Config{}, nil, nil)
+
+	snapshot := record.activeStreamIDsSnapshot()
+	if len(snapshot) != 4 {
+		t.Fatalf("expected snapshot to include stream 0 plus three active streams, got %d entries", len(snapshot))
+	}
+	wantInitial := []int32{0, 3, 7, 9}
+	for i, want := range wantInitial {
+		if snapshot[i] != want {
+			t.Fatalf("unexpected initial snapshot entry %d: got=%d want=%d", i, snapshot[i], want)
+		}
+	}
+
+	record.deactivateStream(7)
+
+	snapshot = record.activeStreamIDsSnapshot()
+	wantAfterDeactivate := []int32{0, 3, 9}
+	if len(snapshot) != len(wantAfterDeactivate) {
+		t.Fatalf("expected %d entries after deactivate, got %d", len(wantAfterDeactivate), len(snapshot))
+	}
+	for i, want := range wantAfterDeactivate {
+		if snapshot[i] != want {
+			t.Fatalf("unexpected snapshot entry after deactivate %d: got=%d want=%d", i, snapshot[i], want)
+		}
+	}
+
+	record.getOrCreateStream(5, arq.Config{}, nil, nil)
+	snapshot = record.activeStreamIDsSnapshot()
+	wantAfterAdd := []int32{0, 3, 5, 9}
+	if len(snapshot) != len(wantAfterAdd) {
+		t.Fatalf("expected %d entries after add, got %d", len(wantAfterAdd), len(snapshot))
+	}
+	for i, want := range wantAfterAdd {
+		if snapshot[i] != want {
+			t.Fatalf("unexpected snapshot entry after add %d: got=%d want=%d", i, snapshot[i], want)
+		}
+	}
+}
+
 func TestHandleStreamRSTRequestPreservesRstAckViaOrphanQueue(t *testing.T) {
 	s := newTestServerForStreamSyn("TCP")
 	record := newTestSessionRecord(14)

@@ -98,7 +98,7 @@ func TestMLQPopAnyIfFindsHighestPriorityMatch(t *testing.T) {
 	q.Push(1, 2, &testItem{key: 2, value: "p1-match"})
 	q.Push(2, 3, &testItem{key: 3, value: "p2-match"})
 
-	item, ok := q.PopAnyIf(func(item *testItem) bool {
+	item, ok := q.PopAnyIf(5, func(item *testItem) bool {
 		return item.value == "p1-match" || item.value == "p2-match"
 	}, testKey)
 	if !ok || item.value != "p1-match" {
