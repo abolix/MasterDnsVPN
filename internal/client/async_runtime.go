@@ -511,16 +511,16 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
 	if err != nil {
 		if errors.Is(err, DnsParser.ErrTXTAnswerMissing) {
 			receivedAt := time.Now()
-			summary := DnsParser.DescribeResponseWithoutTunnelPayload(data)
+			// summary := DnsParser.DescribeResponseWithoutTunnelPayload(data)
 			if parsed, parseErr := DnsParser.ParsePacketLite(data); parseErr == nil && parsed.Header.RCode != 0 {
 				c.trackResolverFailure(data, addr, receivedAt)
 			} else {
 				c.trackResolverSuccess(data, addr, receivedAt)
 			}
-			c.log.Debugf("DNS response from %v had no tunnel TXT payload | %s", addr, summary)
+			// c.log.Debugf("DNS response from %v had no tunnel TXT payload | %s", addr, summary)
 			return
 		}
-		c.log.Debugf("\U0001F6A8 <red>Failed to parse VPN packet from DNS response: %v from %v</red>", err, addr)
+		// c.log.Debugf("\U0001F6A8 <red>Failed to parse VPN packet from DNS response: %v from %v</red>", err, addr)
 		return
 	}
 
