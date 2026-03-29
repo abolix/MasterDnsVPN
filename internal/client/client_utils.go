@@ -334,20 +334,6 @@ func (c *Client) rememberClosedStream(streamID uint16, reason string, now time.T
 	}
 
 	c.recentlyClosedMu.Lock()
-	// Cap the map to prevent unbounded growth during long sessions.
-	// If at limit, evict the oldest entry before adding.
-	const maxRecentlyClosed = 2000
-	if len(c.recentlyClosedStreams) >= maxRecentlyClosed {
-		var oldestID uint16
-		var oldestTime time.Time
-		for id, t := range c.recentlyClosedStreams {
-			if oldestTime.IsZero() || t.Before(oldestTime) {
-				oldestID = id
-				oldestTime = t
-			}
-		}
-		delete(c.recentlyClosedStreams, oldestID)
-	}
 	c.recentlyClosedStreams[streamID] = now.Add(retention)
 	c.recentlyClosedMu.Unlock()
 }
