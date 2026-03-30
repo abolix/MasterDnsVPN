@@ -3,11 +3,29 @@ package client
 import (
 	"context"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"masterdnsvpn-go/internal/config"
 )
+
+func waitForResolverHealthCondition(t *testing.T, timeout time.Duration, cond func() bool, message string) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if cond() {
+		return
+	}
+	t.Fatal(message)
+}
 
 func TestResolverHealthAutoDisablesTimeoutOnlyConnection(t *testing.T) {
 	c := buildTestClientWithResolvers(config.ClientConfig{
@@ -88,9 +106,14 @@ func TestResolverHealthRecheckReactivatesConnection(t *testing.T) {
 
 	c.runResolverRecheckBatch(context.Background(), now)
 
+	waitForResolverHealthCondition(t, 500*time.Millisecond, func() bool {
+		conn, ok := c.GetConnectionByKey("a")
+		return ok && conn.IsValid
+	}, "expected recheck to reactivate resolver")
+
 	conn, ok := c.GetConnectionByKey("a")
-	if !ok || !conn.IsValid {
-		t.Fatal("expected recheck to reactivate resolver")
+	if !ok {
+		t.Fatal("expected reactivated resolver to still exist")
 	}
 	if conn.UploadMTUBytes != 120 || conn.DownloadMTUBytes != 180 {
 		t.Fatalf("expected synced MTUs to be restored, got up=%d down=%d", conn.UploadMTUBytes, conn.DownloadMTUBytes)
@@ -100,6 +123,394 @@ func TestResolverHealthRecheckReactivatesConnection(t *testing.T) {
 	}
 	if c.isRuntimeDisabledResolver("a") {
 		t.Fatal("expected runtime disabled marker to be cleared after reactivation")
+	}
+}
+
+func TestResolverHealthRecheckFailureSchedulesNextRetry(t *testing.T) {
+	c := buildTestClientWithResolvers(config.ClientConfig{
+		RecheckInactiveServersEnabled:  true,
+		RecheckInactiveIntervalSeconds: 60.0,
+		RecheckServerIntervalSeconds:   3.0,
+		RecheckBatchSize:               2,
+	}, "a", "b")
+	c.successMTUChecks = true
+	c.syncedUploadMTU = 120
+	c.syncedDownloadMTU = 180
+
+	if !c.balancer.SetConnectionValidity("a", false) {
+		t.Fatal("expected test connection a to become invalid")
+	}
+
+	c.initResolverRecheckMeta()
+	c.recheckConnectionFn = func(conn *Connection) bool {
+		return false
+	}
+
+	now := time.Date(2026, 3, 30, 9, 0, 0, 0, time.UTC)
+	c.nowFn = func() time.Time { return now }
+
+	c.resolverHealthMu.Lock()
+	c.resolverRecheck["a"] = resolverRecheckState{
+		FailCount: 1,
+		NextAt:    now.Add(-time.Second),
+	}
+	c.runtimeDisabled["a"] = resolverDisabledState{
+		DisabledAt:  now.Add(-time.Minute),
+		NextRetryAt: now.Add(-time.Second),
+		RetryCount:  1,
+		Cause:       "timeout window",
+	}
+	c.resolverHealthMu.Unlock()
+
+	c.runResolverRecheckBatch(context.Background(), now)
+
+	waitForResolverHealthCondition(t, 500*time.Millisecond, func() bool {
+		c.resolverHealthMu.Lock()
+		defer c.resolverHealthMu.Unlock()
+		meta := c.resolverRecheck["a"]
+		return meta.FailCount >= 2 && meta.NextAt.After(now)
+	}, "expected failed recheck to schedule a future retry")
+
+	conn, ok := c.GetConnectionByKey("a")
+	if !ok {
+		t.Fatal("expected resolver a to still exist")
+	}
+	if conn.IsValid {
+		t.Fatal("expected failed recheck to keep resolver invalid")
+	}
+}
+
+func TestResolverHealthRecheckBatchReturnsWhileSlowProbeRunsInBackground(t *testing.T) {
+	c := buildTestClientWithResolvers(config.ClientConfig{
+		RecheckInactiveServersEnabled:  true,
+		RecheckInactiveIntervalSeconds: 60.0,
+		RecheckServerIntervalSeconds:   3.0,
+		RecheckBatchSize:               1,
+	}, "a")
+	c.successMTUChecks = true
+	c.syncedUploadMTU = 120
+	c.syncedDownloadMTU = 180
+
+	if !c.balancer.SetConnectionValidity("a", false) {
+		t.Fatal("expected resolver a to become invalid")
+	}
+
+	c.initResolverRecheckMeta()
+	now := time.Date(2026, 3, 30, 9, 15, 0, 0, time.UTC)
+	c.nowFn = func() time.Time { return now }
+
+	c.resolverHealthMu.Lock()
+	c.resolverRecheck["a"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
+	c.resolverHealthMu.Unlock()
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	c.recheckConnectionFn = func(conn *Connection) bool {
+		calls.Add(1)
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		return true
+	}
+
+	done := make(chan struct{})
+	go func() {
+		c.runResolverRecheckBatch(context.Background(), now)
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected slow recheck probe to start")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected merged implementation to return without waiting for slow probe completion")
+	}
+
+	if calls.Load() != 1 {
+		t.Fatalf("expected exactly one in-flight probe call, got %d", calls.Load())
+	}
+
+	close(release)
+}
+
+func TestResolverHealthRecheckBatchStartsSecondDueResolverWithoutWaitingForFirst(t *testing.T) {
+	c := buildTestClientWithResolvers(config.ClientConfig{
+		RecheckInactiveServersEnabled:  true,
+		RecheckInactiveIntervalSeconds: 60.0,
+		RecheckServerIntervalSeconds:   3.0,
+		RecheckBatchSize:               2,
+	}, "a", "b")
+	c.successMTUChecks = true
+	c.syncedUploadMTU = 120
+	c.syncedDownloadMTU = 180
+
+	for _, key := range []string{"a", "b"} {
+		if !c.balancer.SetConnectionValidity(key, false) {
+			t.Fatalf("expected resolver %s to become invalid", key)
+		}
+	}
+
+	c.initResolverRecheckMeta()
+	now := time.Date(2026, 3, 30, 9, 20, 0, 0, time.UTC)
+	c.nowFn = func() time.Time { return now }
+
+	c.resolverHealthMu.Lock()
+	c.resolverRecheck["a"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
+	c.resolverRecheck["b"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
+	c.resolverHealthMu.Unlock()
+
+	firstStarted := make(chan struct{}, 1)
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{}, 1)
+	var startedA atomic.Int32
+	var startedB atomic.Int32
+
+	c.recheckConnectionFn = func(conn *Connection) bool {
+		if conn == nil {
+			return false
+		}
+		switch conn.Key {
+		case "a":
+			startedA.Add(1)
+			select {
+			case firstStarted <- struct{}{}:
+			default:
+			}
+			<-releaseFirst
+			return true
+		case "b":
+			startedB.Add(1)
+			select {
+			case secondStarted <- struct{}{}:
+			default:
+			}
+			return true
+		default:
+			return false
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		c.runResolverRecheckBatch(context.Background(), now)
+		close(done)
+	}()
+
+	select {
+	case <-firstStarted:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected first due resolver to start recheck")
+	}
+
+	select {
+	case <-secondStarted:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected second due resolver to start without waiting for first probe to finish")
+	}
+
+	if startedA.Load() != 1 {
+		t.Fatalf("expected first resolver to start once, got %d", startedA.Load())
+	}
+	if startedB.Load() != 1 {
+		t.Fatalf("expected second resolver to start once, got %d", startedB.Load())
+	}
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected batch to return after launching background rechecks")
+	}
+
+	close(releaseFirst)
+}
+
+func TestResolverHealthRecheckBatchDoesNotLaunchSameResolverTwiceWhileInFlight(t *testing.T) {
+	c := buildTestClientWithResolvers(config.ClientConfig{
+		RecheckInactiveServersEnabled:  true,
+		RecheckInactiveIntervalSeconds: 60.0,
+		RecheckServerIntervalSeconds:   3.0,
+		RecheckBatchSize:               1,
+	}, "a")
+	c.successMTUChecks = true
+	c.syncedUploadMTU = 120
+	c.syncedDownloadMTU = 180
+
+	if !c.balancer.SetConnectionValidity("a", false) {
+		t.Fatal("expected resolver a to become invalid")
+	}
+
+	c.initResolverRecheckMeta()
+	now := time.Date(2026, 3, 30, 9, 25, 0, 0, time.UTC)
+	c.nowFn = func() time.Time { return now }
+
+	c.resolverHealthMu.Lock()
+	c.resolverRecheck["a"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
+	c.runtimeDisabled["a"] = resolverDisabledState{
+		DisabledAt:  now.Add(-time.Minute),
+		NextRetryAt: now.Add(-time.Second),
+		RetryCount:  1,
+		Cause:       "timeout window",
+	}
+	c.resolverHealthMu.Unlock()
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	c.recheckConnectionFn = func(conn *Connection) bool {
+		calls.Add(1)
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		return false
+	}
+
+	c.runResolverRecheckBatch(context.Background(), now)
+
+	select {
+	case <-started:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected first in-flight recheck to start")
+	}
+
+	c.runResolverRecheckBatch(context.Background(), now.Add(10*time.Millisecond))
+
+	select {
+	case <-started:
+		t.Fatal("expected in-flight resolver to be skipped by subsequent batches")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if calls.Load() != 1 {
+		t.Fatalf("expected only one in-flight probe call, got %d", calls.Load())
+	}
+
+	close(release)
+
+	waitForResolverHealthCondition(t, 500*time.Millisecond, func() bool {
+		c.resolverHealthMu.Lock()
+		defer c.resolverHealthMu.Unlock()
+		meta := c.resolverRecheck["a"]
+		return !meta.InFlight && meta.FailCount >= 1 && meta.NextAt.After(now)
+	}, "expected failed in-flight recheck to clear in-flight state and schedule retry")
+}
+
+func TestResolverHealthRecheckBatchHonorsLimit(t *testing.T) {
+	c := buildTestClientWithResolvers(config.ClientConfig{
+		RecheckInactiveServersEnabled:  true,
+		RecheckInactiveIntervalSeconds: 60.0,
+		RecheckServerIntervalSeconds:   3.0,
+		RecheckBatchSize:               1,
+	}, "a", "b", "c")
+	c.successMTUChecks = true
+	c.syncedUploadMTU = 120
+	c.syncedDownloadMTU = 180
+
+	for _, key := range []string{"a", "b", "c"} {
+		if !c.balancer.SetConnectionValidity(key, false) {
+			t.Fatalf("expected resolver %s to become invalid", key)
+		}
+	}
+
+	c.initResolverRecheckMeta()
+	c.recheckConnectionFn = func(conn *Connection) bool {
+		return conn != nil
+	}
+
+	now := time.Date(2026, 3, 30, 9, 5, 0, 0, time.UTC)
+	c.nowFn = func() time.Time { return now }
+
+	c.resolverHealthMu.Lock()
+	for _, key := range []string{"a", "b", "c"} {
+		c.resolverRecheck[key] = resolverRecheckState{
+			FailCount: 0,
+			NextAt:    now.Add(-time.Second),
+		}
+	}
+	c.resolverHealthMu.Unlock()
+
+	c.runResolverRecheckBatch(context.Background(), now)
+
+	waitForResolverHealthCondition(t, 500*time.Millisecond, func() bool {
+		validCount := 0
+		for _, key := range []string{"a", "b", "c"} {
+			conn, ok := c.GetConnectionByKey(key)
+			if ok && conn.IsValid {
+				validCount++
+			}
+		}
+		return validCount == 1
+	}, "expected only one resolver to be rechecked due to batch limit")
+
+	validCount := 0
+	for _, key := range []string{"a", "b", "c"} {
+		conn, ok := c.GetConnectionByKey(key)
+		if ok && conn.IsValid {
+			validCount++
+		}
+	}
+	if validCount != 1 {
+		t.Fatalf("expected exactly one resolver to reactivate, got %d", validCount)
+	}
+}
+
+func TestResolverHealthRecheckBatchSkipsNotYetDueResolvers(t *testing.T) {
+	c := buildTestClientWithResolvers(config.ClientConfig{
+		RecheckInactiveServersEnabled:  true,
+		RecheckInactiveIntervalSeconds: 60.0,
+		RecheckServerIntervalSeconds:   3.0,
+		RecheckBatchSize:               2,
+	}, "a", "b")
+	c.successMTUChecks = true
+	c.syncedUploadMTU = 120
+	c.syncedDownloadMTU = 180
+
+	if !c.balancer.SetConnectionValidity("a", false) {
+		t.Fatal("expected resolver a to become invalid")
+	}
+	if !c.balancer.SetConnectionValidity("b", false) {
+		t.Fatal("expected resolver b to become invalid")
+	}
+
+	c.initResolverRecheckMeta()
+
+	seen := make(map[string]int)
+	c.recheckConnectionFn = func(conn *Connection) bool {
+		if conn != nil {
+			seen[conn.Key]++
+		}
+		return conn != nil && conn.Key == "a"
+	}
+
+	now := time.Date(2026, 3, 30, 9, 10, 0, 0, time.UTC)
+	c.nowFn = func() time.Time { return now }
+
+	c.resolverHealthMu.Lock()
+	c.resolverRecheck["a"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
+	c.resolverRecheck["b"] = resolverRecheckState{NextAt: now.Add(time.Minute)}
+	c.resolverHealthMu.Unlock()
+
+	c.runResolverRecheckBatch(context.Background(), now)
+
+	waitForResolverHealthCondition(t, 500*time.Millisecond, func() bool {
+		conn, ok := c.GetConnectionByKey("a")
+		return ok && conn.IsValid
+	}, "expected due resolver a to reactivate")
+
+	if seen["a"] != 1 {
+		t.Fatalf("expected resolver a to be rechecked once, got %d", seen["a"])
+	}
+	if seen["b"] != 0 {
+		t.Fatalf("expected resolver b to be skipped while not due, got %d checks", seen["b"])
 	}
 }
 
