@@ -1,16 +1,57 @@
-﻿# پروژه MasterDnsVPN 🚀
+﻿# پروژه MasterDnsVPN 🔐
 
-## [نسخه فارسی](https://github.com/masterking32/MasterDnsVPN/blob/main/README_FA.MD) | [English Version](https://github.com/masterking32/MasterDnsVPN/blob/main/README.MD) | [Spanish Version](https://github.com/masterking32/MasterDnsVPN/blob/main/README_ES.MD)
+## [نسخه فارسی](https://github.com/masterking32/MasterDnsVPN/blob/main/README_FA.MD) | [English Version](https://github.com/masterking32/MasterDnsVPN/blob/main/README.MD) | 
 
-پروژه **MasterDnsVPN** یک راهکار مقاوم، کم‌سربار و پیشرفته برای دور زدن فیلترینگ و سانسور اینترنت است که ترافیک TCP و پروتکل‌های مبتنی بر آن را در قالب query و responseهای DNS حمل می‌کند. نسخه فعلی پروژه به‌صورت کامل با **Go** پیاده‌سازی شده و مسیر اصلی و بهینه‌ی آن برای **SOCKS5 over DNS** طراحی شده است.
+پروژه **MasterDnsVPN** یک پروژهٔ علمی-تحقیقاتی برای انتقال داده‌های TCP از طریق درخواست‌ها و پاسخ‌های DNS است. این پروژه در هدف کلی شبیه پروژه‌هایی مانند DNSTT یا SlipStream است، اما از نظر ساختار و روش پیاده‌سازی تفاوت‌های بنیادین دارد و رویکرد متفاوتی را دنبال می‌کند.
+پیاده‌سازی این سیستم بر پایهٔ سازگاری با انواع شبکه‌ها و رزولورها و نیز توانایی تحمل محدودیت‌های شدید طراحی شده است، تا در بدترین شرایط ممکن بالاترین میزان انتقال داده و بیشترین پایداری را فراهم کند.
+اگرچه اصول طراحی پروژه قوی است، کیفیت و سرعت ارتباط به‌طور چشمگیری به موارد زیر وابسته است:
+1. عملکرد رزولورها (سرعت Resolve، میزان MTU قابل پشتیبانی و...)
+2. سرور خارجی شما (پینگ و سرعت ارتباط سرور با رزولورها و سخت‌افزار سرور)
+3. کیفیت اینترنت شما (سرعت دسترسی به رزولورها و وجود رزولورهای مناسب)
 
-این سامانه به‌طور خاص برای شرایطی طراحی شده که روش‌های سنتی VPN یا تونل‌های شناخته‌شده، به‌دلیل اختلالات گسترده، loss بالا، محدودیت MTU، یا مسدودسازی resolverها کیفیت کافی ندارند.
+از آنجا که تمام پروژه‌های مبتنی بر DNS نسبت به این عوامل حساسند، عملکرد MasterDnsVPN نیز بسته به شرایط فوق می‌تواند متفاوت باشد.
 
-هدف اصلی **MasterDnsVPN** فراهم کردن تونلی امن، قابل‌اعتماد و انعطاف‌پذیر است که سربار پروتکل را به حداقل رسانده و روی لینک‌های ناپایدار هم پایداری قابل قبولی بدهد.
+### 📊  مقایسه MasterDnsVPN با پروژه‌های مشابه:
+
+| ویژگی | SlipStream | DNSTT | MasterDnsVPN |
+| :--- | :--- | :--- | :--- |
+| نوع پروتکل | DNS Tunnel پیشرفته | DNS Tunnel کلاسیک | DNS Tunnel / VPN پیشرفته |
+| پروتکل انتقال | QUIC | KCP + Noise | پروتکل اختصاصی + ARQ |
+| سربار هدرهای انتقالی | 🟠 ~24B | 🔴 ~59B | 🟢 ~5–7B (≈88% کمتر از DNSTT، ≈71% کمتر از SlipStream) |
+| نوع رمزنگاری | TLS 1.3 (در QUIC) | Noise (Curve25519) | AES / ChaCha20 / XOR (در صورت استفاده از XOR: امنیت نسبی ولی بدون سربار اضافی) |
+| معماری | یکپارچه (QUIC همه‌چیز را پوشش می‌دهد) | چندلایه (KCP + SMUX + Noise) | طراحی اختصاصی سبک، بهینه برای DNS |
+| کارایی (سرعت) | 🟡 بالا (تا ~5× سریع‌تر از DNSTT) | 🔴 متوسط | 🟢 سازگار با شرایط بسیار بد؛ در بسیاری موارد عملکرد بهتر |
+| پایداری در Packet Loss | 🟡 خوب | 🟠 متوسط | 🟢 بسیار بالا (Multipath + ARQ) |
+| استفاده از چند DNS resolver | بله (multipath) | ❌ | بله — پیشرفته (multi-resolver + duplication) |
+| تحمل سانسور شدید | خوب | متوسط | بسیار قوی (هدف اصلی پروژه) |
+| پیچیدگی راه‌اندازی | متوسط | ساده | ساده؛ اما با پیکربندی پیشرفته قابل تنظیم و کمی پیچیده‌تر |
+| پشتیبانی SOCKS5 | بله | بله | بهینه‌شده برای SOCKS5 / SOCKS4 |
+| پشتیبانی Shadowsocks | ✅ | ❌ | غیرمستقیم: در حالت TCP Forwarding از پروتکل‌های TCP پشتیبانی می‌کند |
+| Multipath واقعی | بله (QUIC multipath) | ❌ | بله (multi-resolver + duplication) |
+| Adaptive routing | محدود | ❌ | پیشرفته (مبتنی بر latency/loss) |
+| هدف طراحی | سرعت و کارایی بالا | سادگی و پایداری | عبور از محدودترین شبکه‌ها — پایداری، سرعت و کارایی |
+| زبان پیاده‌سازی | Rust | Go | Python و Go |
+| بالانسر داخلی | 🔴 | ❌ | 🟢 (4 نوع بالانسر داخلی) |
+| سیستم Duplication | ❌ | ❌ | بله — افزایش ترافیک برای تضمین پایداری (قابل تنظیم) |
+| MTU قابل پشتیبانی | بهتر از DNSTT | - | سازگار حتی با MTU کم به دلیل سربار بسیار پایین پروتکل |
+| سیستم Failover | ❌ | ❌ | ✅ |
+| بررسی سلامت رزولورها و غیرفعال‌سازی خودکار | ❌ | ❌ | ✅ |
+| بازفعال‌سازی رزولورها در صورت دسترسی دوباره (پس‌زمینه) | ❌ | ❌ | ✅ |
+| ارائه DNS محلی در کلاینت (جلوگیری از DNS Hijacking) | ❌ | ❌ | ✅ (با DNS Caching حرفه‌ای برای کاهش درخواست‌ها) |
+| قابلیت DNS resolving از طریق SOCKS5 | ❌ | ❌ | ✅ (با DNS Caching) |
+| امکان پیکربندی حرفه‌ای و دلخواه | 🟠 | 🟠 | 🟢 امکان پیکربندی دقیق تمام بخش‌ها |
+| بی‌نیاز از نرم‌افزارهای جانبی | ❌ | ❌ | 🟢 نیازی به نصب نرم‌افزار جانبی نیست؛ در صورت نیاز می‌توانید از SOCKS یا ابزارهای خارجی مانند Shadowsocks یا OpenVPN استفاده کنید. |
 
 ---
 
-❌ رفع مسئولیت: این پروژه فقط جنبه آموزشی و تحقیقاتی دارد. استفاده از آن ممکن است با قوانین یا سیاست‌های شبکه در برخی کشورها یا محیط‌ها ناسازگار باشد و مسئولیت استفاده از آن بر عهده خود کاربر است.
+### ❌ رفع مسئولیت (Disclaimer):
+پروژه MasterDnsVPN صرفاً یک ایدهٔ علمی و آموزشی است و بر همین اساس طراحی و پیاده‌سازی شده است.
+
+- **ارائه بدون ضمانت:** این نرم‌افزار «همان‌طور که هست» (AS-IS) و بدون هیچ‌گونه ضمانت صریح یا ضمنی، از جمله ضمانت قابلیت فروش، مناسب‌بودن برای هدف خاص یا عدم نقض حقوق، ارائه می‌شود.
+- **محدودیت مسئولیت:** توسعه‌دهندگان و مشارکت‌کنندگان این پروژه هیچ‌گونه مسئولیتی در قبال خسارات مستقیم، غیرمستقیم، تبعی، اتفاقی یا هر نوع خسارت دیگری ناشی از استفاده یا ناتوانی در استفاده از این نرم‌افزار نمی‌پذیرند.
+- **مسئولیت کاربر:** استفاده از این پروژه در محیط‌های غیرآزمایشگاهی ممکن است به ساختار شبکه آسیب برساند. کاربر به‌تنهایی مسئول هرگونه پیامد ناشی از نصب، پیکربندی و استفاده از این نرم‌افزار است.
+- **رعایت قوانین:** استفاده از این پروژه برای دور زدن قوانین کشورها می‌تواند با مسئولیت‌های مدنی و کیفری همراه باشد. لطفاً پیش از استفاده، قوانین و مقررات کشور خود را در این زمینه به‌دقت بررسی کنید. توسعه‌دهندگان هیچ مسئولیتی در قبال نقض قوانین محلی، ملی یا بین‌المللی توسط کاربران نمی‌پذیرند.
+- **مجوز استفاده:** استفاده، کپی، توزیع یا تغییر این نرم‌افزار مشمول شرایط مجوز مندرج در فایل `LICENSE` این مخزن است. هرگونه استفاده خارج از چارچوب آن مجوز ممنوع است. 
 
 ---
 
@@ -659,68 +700,68 @@ sudo systemctl restart systemd-resolved
 
 ```mermaid
 graph TD
-    subgraph Client_Side ["🖥️ سیستم کاربر (Client - Go)"]
-        App["📱 برنامه‌ها (مرورگر، تلگرام و...)"]
-        Proxy["🧦 پروکسی محلی SOCKS5 / TCP"]
-        LDNS["📛 Local DNS (اختیاری)"]
-        ResolverRuntime["⚡ Balancer + Duplication + Resolver Health"]
-        ClientARQ["🔄 ARQ + Session/Stream Runtime"]
-    end
+    subgraph Client_Side ["🖥️ سیستم کاربر (Client - Go)"]
+        App["📱 برنامه‌ها (مرورگر، تلگرام و...)"]
+        Proxy["🧦 پروکسی محلی SOCKS5 / TCP"]
+        LDNS["📛 Local DNS (اختیاری)"]
+        ResolverRuntime["⚡ Balancer + Duplication + Resolver Health"]
+        ClientARQ["🔄 ARQ + Session/Stream Runtime"]
+    end
 
-    subgraph DNS_Network ["🌐 شبکه عمومی DNS"]
-        R1["📡 Resolver 1"]
-        R2["📡 Resolver 2"]
-        RN["📡 Resolver N"]
-    end
+    subgraph DNS_Network ["🌐 شبکه عمومی DNS"]
+        R1["📡 Resolver 1"]
+        R2["📡 Resolver 2"]
+        RN["📡 Resolver N"]
+    end
 
-    subgraph Server_Side ["🖥️ سرور خارج از کشور (Server - Go)"]
-        UDP["📥 UDP Listener + Request Workers"]
-        Sessions["🧠 Session Store + Deferred Workers"]
-        ServerARQ["🔄 Server ARQ + Packed Control Blocks"]
-        DNSUp["📛 DNS Upstream / Cache"]
-        Out["🌐 Direct Dial یا External SOCKS5"]
-    end
+    subgraph Server_Side ["🖥️ سرور خارج از کشور (Server - Go)"]
+        UDP["📥 UDP Listener + Request Workers"]
+        Sessions["🧠 Session Store + Deferred Workers"]
+        ServerARQ["🔄 Server ARQ + Packed Control Blocks"]
+        DNSUp["📛 DNS Upstream / Cache"]
+        Out["🌐 Direct Dial یا External SOCKS5"]
+    end
 
-    App --> Proxy
-    App --> LDNS
-    Proxy --> ClientARQ
-    LDNS --> ClientARQ
-    ClientARQ --> ResolverRuntime
-    ResolverRuntime --> R1
-    ResolverRuntime --> R2
-    ResolverRuntime --> RN
-    R1 --> UDP
-    R2 --> UDP
-    RN --> UDP
-    UDP --> Sessions
-    Sessions --> ServerARQ
-    Sessions --> DNSUp
-    ServerARQ --> Out
-    DNSUp --> UDP
+    App --> Proxy
+    App --> LDNS
+    Proxy --> ClientARQ
+    LDNS --> ClientARQ
+    ClientARQ --> ResolverRuntime
+    ResolverRuntime --> R1
+    ResolverRuntime --> R2
+    ResolverRuntime --> RN
+    R1 --> UDP
+    R2 --> UDP
+    RN --> UDP
+    UDP --> Sessions
+    Sessions --> ServerARQ
+    Sessions --> DNSUp
+    ServerARQ --> Out
+    DNSUp --> UDP
 ```
 
 ### بخش ۶.۲: جریان و چرخهٔ حیات پکت‌ها 🔄
 
 ```mermaid
 sequenceDiagram
-    participant App as 📱 برنامه کاربر
-    participant Client as 🖥️ کلاینت Go
-    participant DNS as 📡 Resolverها
-    participant Server as 🖥️ سرور Go
-    participant Target as 🌐 مقصد نهایی
+    participant App as 📱 برنامه کاربر
+    participant Client as 🖥️ کلاینت Go
+    participant DNS as 📡 Resolverها
+    participant Server as 🖥️ سرور Go
+    participant Target as 🌐 مقصد نهایی
 
-    App->>Client: ایجاد اتصال SOCKS5 / TCP
-    Note over Client: ساخت Session/Stream<br/>رمزنگاری، ARQ، انتخاب Resolver
-    Client->>DNS: ارسال DNS Query با Duplication و Balancing
-    DNS->>Server: تحویل Query به NS سرور
-    Note over Server: Checksum / Cookie / Session lookup<br/>Deferred setup / ARQ / Queueing
-    Server->>Target: اتصال مستقیم یا از طریق SOCKS5 خارجی
-    Target-->>Server: دریافت پاسخ مقصد
-    Note over Server: قرار دادن دیتا در ARQ<br/>ساخت ACK و Packed Control Blocks
-    Server-->>DNS: DNS Response
-    DNS-->>Client: پاسخ DNS
-    Note over Client: ARQ reorder / ACK consume / تحویل به برنامه
-    Client-->>App: داده سالم و مرتب
+    App->>Client: ایجاد اتصال SOCKS5 / TCP
+    Note over Client: ساخت Session/Stream<br/>رمزنگاری، ARQ، انتخاب Resolver
+    Client->>DNS: ارسال DNS Query با Duplication و Balancing
+    DNS->>Server: تحویل Query به NS سرور
+    Note over Server: Checksum / Cookie / Session lookup<br/>Deferred setup / ARQ / Queueing
+    Server->>Target: اتصال مستقیم یا از طریق SOCKS5 خارجی
+    Target-->>Server: دریافت پاسخ مقصد
+    Note over Server: قرار دادن دیتا در ARQ<br/>ساخت ACK و Packed Control Blocks
+    Server-->>DNS: DNS Response
+    DNS-->>Client: پاسخ DNS
+    Note over Client: ARQ reorder / ACK consume / تحویل به برنامه
+    Client-->>App: داده سالم و مرتب
 ```
 
 ### بخش ۶.۳: مفاهیم کلیدی استفاده‌شده 🧠
@@ -766,3 +807,4 @@ sequenceDiagram
 ## 👨‍💻 توسعه‌دهنده (Developer)
 
 توسعه‌داده‌شده با ❤️ توسط: [**MasterkinG32**](https://github.com/masterking32)
+
