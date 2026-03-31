@@ -22,6 +22,15 @@ backup_file_once() {
   local f="$1"
   [[ -f "$f" && ! -f "${f}.bak" ]] && cp -a "$f" "${f}.bak"
 }
+extract_config_version() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  grep '^CONFIG_VERSION' "$f" | awk -F'=' '{print $2}' | tr -d ' "' | head -n1
+}
+version_lt() {
+  [[ "$1" == "$2" ]] && return 1
+  [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" == "$1" ]]
+}
 detect_legacy_linux() {
   local id="${ID:-}"
   local version_major="${VERSION_ID%%.*}"
@@ -479,17 +488,27 @@ shopt -u nullglob
 
 log_header "Configuration"
 [[ -f "server_config.toml" ]] || log_error "server_config.toml not found after extraction."
+CURRENT_VERSION="$(extract_config_version server_config.toml)"
+if [[ -z "${CURRENT_VERSION:-}" ]]; then
+  log_error "Downloaded server_config.toml is invalid (CONFIG_VERSION missing)."
+fi
 if [[ -f "server_config.toml.backup" ]]; then
-  if cmp -s server_config.toml server_config.toml.backup; then
+  BACKUP_VERSION="$(extract_config_version server_config.toml.backup)"
+  if [[ -z "${BACKUP_VERSION:-}" ]]; then
+    log_error "Backup config is too old (CONFIG_VERSION missing). Merge manually."
+  fi
+
+  if [[ "$BACKUP_VERSION" == "$CURRENT_VERSION" ]]; then
     mv -f server_config.toml.backup server_config.toml
     log_info "Config restored from backup."
+  elif version_lt "$BACKUP_VERSION" "$CURRENT_VERSION"; then
+    OLD_CFG_NAME="server_config_$(date +%Y%m%d_%H%M%S).toml"
+    mv -f server_config.toml.backup "$OLD_CFG_NAME"
+    log_warn "Old config version detected (backup=$BACKUP_VERSION < new=$CURRENT_VERSION)."
+    log_warn "Previous config renamed to: $OLD_CFG_NAME"
+    log_info "Using fresh config template; please set DOMAIN and other required fields."
   else
-    NEW_CFG_NAME="server_config.new.toml"
-    mv -f server_config.toml "$NEW_CFG_NAME"
-    mv -f server_config.toml.backup server_config.toml
-    log_warn "Existing config preserved."
-    log_warn "A fresh config template was saved as: $NEW_CFG_NAME"
-    log_info "Review new options in $NEW_CFG_NAME and merge any settings you want."
+    log_error "Backup config version is newer than package config (backup=$BACKUP_VERSION, new=$CURRENT_VERSION). Merge manually."
   fi
 fi
 
