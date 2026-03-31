@@ -397,16 +397,16 @@ dispatchLoop:
 
 			select {
 			case c.txChannel <- pkt:
-				// if !isLogged && pkt.packetType != Enums.PACKET_PING {
-				// 	packedSummary := ""
-				// 	if opts.PacketType == Enums.PACKET_PACKED_CONTROL_BLOCKS {
-				// 		packedSummary = " | " + VpnProto.DescribePackedControlBlocks(opts.Payload, 4)
-				// 	}
-				// 	c.logOutboundPacket(opts.PacketType, opts.SessionID, len(opts.Payload), opts.StreamID, opts.SequenceNum, opts.FragmentID, opts.TotalFragments, packedSummary)
-				// }
-				// isLogged = true
 			default:
-				c.log.Warnf("TX channel filled before enqueue completed | Packet: %s | Stream: %d", Enums.PacketTypeName(finalPacket.packetType), selectedStreamID)
+				// Brief backpressure: wait up to one idle-poll interval before dropping.
+				// This avoids silent packet loss that forces expensive ARQ retransmits.
+				select {
+				case c.txChannel <- pkt:
+				case <-time.After(idlePoll):
+					c.log.Warnf("TX channel full, packet dropped | Packet: %s | Stream: %d", Enums.PacketTypeName(finalPacket.packetType), selectedStreamID)
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 
