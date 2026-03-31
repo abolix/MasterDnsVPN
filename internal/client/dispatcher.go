@@ -197,10 +197,25 @@ dispatchLoop:
 		}
 
 		if !c.txChannelHasCapacity(len(conns)) {
-			if !waitForWork() {
+			select {
+			case <-ctx.Done():
 				return
+			case <-c.txSpaceSignal:
+				if !c.txChannelHasCapacity(len(conns)) {
+					continue dispatchLoop
+				}
+			case <-idleTimer.C:
+				if !idleTimer.Stop() {
+					select {
+					case <-idleTimer.C:
+					default:
+					}
+				}
+				idleTimer.Reset(idlePoll)
+				if !c.txChannelHasCapacity(len(conns)) {
+					continue dispatchLoop
+				}
 			}
-			continue dispatchLoop
 		}
 
 		var item *clientStreamTXPacket
@@ -375,7 +390,8 @@ dispatchLoop:
 		}
 
 		packetByDomain := make(map[string][]byte, len(conns))
-		// var isLogged bool = false
+		pendingPkts := make([]asyncPacket, 0, len(conns))
+
 		for _, conn := range conns {
 			domain := conn.Domain
 			if domain == "" {
@@ -394,19 +410,25 @@ dispatchLoop:
 			pkt := finalPacket
 			pkt.conn = conn
 			pkt.payload = dnsPacket
+			pendingPkts = append(pendingPkts, pkt)
+		}
 
+		if !c.txChannelHasCapacity(len(pendingPkts)) {
+			select {
+			case c.txSignal <- struct{}{}:
+			default:
+			}
+			if !wasPacked && selected != nil {
+				selected.ReleaseTXPacket(item)
+			}
+			continue dispatchLoop
+		}
+
+		for _, pkt := range pendingPkts {
 			select {
 			case c.txChannel <- pkt:
 			default:
-				// Brief backpressure: wait up to one idle-poll interval before dropping.
-				// This avoids silent packet loss that forces expensive ARQ retransmits.
-				select {
-				case c.txChannel <- pkt:
-				case <-time.After(idlePoll):
-					c.log.Warnf("TX channel full, packet dropped | Packet: %s | Stream: %d", Enums.PacketTypeName(finalPacket.packetType), selectedStreamID)
-				case <-ctx.Done():
-					return
-				}
+				c.log.Warnf("TX channel race: packet dropped | Packet: %s | Stream: %d", Enums.PacketTypeName(finalPacket.packetType), selectedStreamID)
 			}
 		}
 
