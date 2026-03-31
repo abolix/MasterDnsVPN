@@ -39,6 +39,7 @@ type connectionStats struct {
 	acked        atomic.Uint64
 	rttMicrosSum atomic.Uint64
 	rttCount     atomic.Uint64
+	halveMu      sync.Mutex
 }
 
 type balancerSnapshot struct {
@@ -246,10 +247,17 @@ func (b *Balancer) ReportSuccess(serverKey string, rtt time.Duration) {
 		return
 	}
 
-	stats.sent.Store(sent / 2)
-	stats.acked.Store(stats.acked.Load() / 2)
-	stats.rttMicrosSum.Store(stats.rttMicrosSum.Load() / 2)
-	stats.rttCount.Store(stats.rttCount.Load() / 2)
+	// Halve all counters atomically under a mutex to prevent drift between
+	// sent/acked ratios which would corrupt LeastLoss/LowestLatency scoring.
+	stats.halveMu.Lock()
+	sent = stats.sent.Load()
+	if sent > 1000 {
+		stats.sent.Store(sent / 2)
+		stats.acked.Store(stats.acked.Load() / 2)
+		stats.rttMicrosSum.Store(stats.rttMicrosSum.Load() / 2)
+		stats.rttCount.Store(stats.rttCount.Load() / 2)
+	}
+	stats.halveMu.Unlock()
 }
 
 func (b *Balancer) ResetServerStats(serverKey string) {
