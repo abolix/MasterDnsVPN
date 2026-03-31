@@ -313,12 +313,24 @@ func (c *Client) asyncStreamCleanupWorker(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
+	fragmentPurgeCounter := 0
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
 			c.cleanupRecentlyClosedStreams(now)
+
+			// Purge stale DNS response fragments every 10 seconds to prevent
+			// memory leaks when no new fragments arrive for a given key.
+			fragmentPurgeCounter++
+			if fragmentPurgeCounter >= 10 {
+				fragmentPurgeCounter = 0
+				if c.dnsResponses != nil {
+					c.dnsResponses.Purge(now, c.cfg.DNSResponseFragmentTimeout())
+				}
+			}
 
 			c.streamsMu.RLock()
 			streams := make([]*Stream_client, 0, len(c.active_streams))
