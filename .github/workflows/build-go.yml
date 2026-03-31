@@ -51,6 +51,26 @@ jobs:
             package: zip
             go_arch: amd64
             go_os: windows
+            cgo_enabled: "0"
+            smoke_test: true
+          - os: windows-latest
+            platform: Windows
+            arch: x86
+            ext: .exe
+            package: zip
+            go_arch: 386
+            go_os: windows
+            cgo_enabled: "0"
+            smoke_test: false
+          - os: windows-latest
+            platform: Windows
+            arch: arm64
+            ext: .exe
+            package: zip
+            go_arch: arm64
+            go_os: windows
+            cgo_enabled: "0"
+            smoke_test: false
           - os: ubuntu-22.04
             platform: Linux
             arch: amd64
@@ -58,6 +78,17 @@ jobs:
             package: tar.gz
             go_arch: amd64
             go_os: linux
+            cgo_enabled: "0"
+            smoke_test: true
+          - os: ubuntu-22.04
+            platform: Linux
+            arch: x86
+            ext: ""
+            package: tar.gz
+            go_arch: 386
+            go_os: linux
+            cgo_enabled: "0"
+            smoke_test: false
           - os: ubuntu-latest
             platform: Linux-Legacy
             arch: amd64
@@ -65,6 +96,8 @@ jobs:
             package: tar.gz
             go_arch: amd64
             go_os: linux
+            cgo_enabled: "0"
+            smoke_test: true
           - os: ubuntu-24.04-arm
             platform: Linux
             arch: arm64
@@ -72,6 +105,27 @@ jobs:
             package: tar.gz
             go_arch: arm64
             go_os: linux
+            cgo_enabled: "0"
+            smoke_test: true
+          - os: ubuntu-24.04-arm
+            platform: Linux-Legacy
+            arch: arm64
+            ext: ""
+            package: tar.gz
+            go_arch: arm64
+            go_os: linux
+            cgo_enabled: "0"
+            smoke_test: false
+          - os: ubuntu-22.04
+            platform: Linux
+            arch: armv7
+            ext: ""
+            package: tar.gz
+            go_arch: arm
+            go_arm: "7"
+            go_os: linux
+            cgo_enabled: "0"
+            smoke_test: false
           - os: macos-latest
             platform: MacOS
             arch: arm64
@@ -79,6 +133,36 @@ jobs:
             package: tar.gz
             go_arch: arm64
             go_os: darwin
+            cgo_enabled: "0"
+            smoke_test: true
+          - os: macos-latest
+            platform: MacOS
+            arch: amd64
+            ext: ""
+            package: tar.gz
+            go_arch: amd64
+            go_os: darwin
+            cgo_enabled: "0"
+            smoke_test: false
+          - os: ubuntu-22.04
+            platform: Termux
+            arch: arm64
+            ext: ""
+            package: tar.gz
+            go_arch: arm64
+            go_os: android
+            cgo_enabled: "0"
+            smoke_test: false
+          - os: ubuntu-22.04
+            platform: Termux
+            arch: armv7
+            ext: ""
+            package: tar.gz
+            go_arch: arm
+            go_arm: "7"
+            go_os: android
+            cgo_enabled: "0"
+            smoke_test: false
 
     steps:
       - name: Checkout repository
@@ -110,17 +194,39 @@ jobs:
 
       - name: Build client
         env:
+          CGO_ENABLED: ${{ matrix.cgo_enabled }}
           GOOS: ${{ matrix.go_os }}
           GOARCH: ${{ matrix.go_arch }}
+          GOARM: ${{ matrix.go_arm }}
         run: |
           go build -ldflags "-X masterdnsvpn-go/internal/version.BuildVersion=${{ needs.preflight.outputs.release_tag }}" -o dist/MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }} ./cmd/client
 
       - name: Build server
         env:
+          CGO_ENABLED: ${{ matrix.cgo_enabled }}
           GOOS: ${{ matrix.go_os }}
           GOARCH: ${{ matrix.go_arch }}
+          GOARM: ${{ matrix.go_arm }}
         run: |
           go build -ldflags "-X masterdnsvpn-go/internal/version.BuildVersion=${{ needs.preflight.outputs.release_tag }}" -o dist/MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }} ./cmd/server
+
+      - name: Verify Linux-Legacy binaries are not dynamically linked
+        if: ${{ matrix.platform == 'Linux-Legacy' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          client_bin="dist/MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
+          server_bin="dist/MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
+
+          for bin in "$client_bin" "$server_bin"; do
+            echo "Inspecting $bin"
+            output="$(ldd "$bin" 2>&1 || true)"
+            echo "$output"
+            if [[ "$output" != *"not a dynamic executable"* && "$output" != *"statically linked"* ]]; then
+              echo "Expected a static/pure-Go legacy binary, but $bin still looks dynamically linked." >&2
+              exit 1
+            fi
+          done
 
       - name: Bundle config templates with executables
         shell: bash
@@ -150,7 +256,7 @@ jobs:
           PY
 
       - name: Smoke test executables (Windows)
-        if: ${{ matrix.os == 'windows-latest' }}
+        if: ${{ matrix.os == 'windows-latest' && matrix.smoke_test }}
         shell: powershell
         run: |
           Set-StrictMode -Version Latest
@@ -189,7 +295,7 @@ jobs:
           }
 
       - name: Smoke test executables (non-Windows)
-        if: ${{ matrix.go_os == 'linux' || (matrix.os == 'macos-latest' && matrix.go_os == 'darwin') }}
+        if: ${{ matrix.smoke_test && (matrix.go_os == 'linux' || (matrix.os == 'macos-latest' && matrix.go_os == 'darwin')) }}
         shell: bash
         run: |
           set -euo pipefail
@@ -361,6 +467,15 @@ jobs:
             Compress-Archive -Path "README_FA.html" -Update -DestinationPath "${clientZipBase}.zip"
           }
 
+          $hashTargets = @()
+          if (Test-Path "${clientZipBase}.zip") { $hashTargets += "${clientZipBase}.zip" }
+          if (Test-Path "${serverZipBase}.zip") { $hashTargets += "${serverZipBase}.zip" }
+          if ($hashTargets.Count -gt 0) {
+            Get-FileHash -Algorithm SHA256 $hashTargets |
+              ForEach-Object { "{0}  {1}" -f $_.Hash.ToLowerInvariant(), (Split-Path $_.Path -Leaf) } |
+              Set-Content "SHA256SUMS.txt"
+          }
+
       - name: Package artifacts (non-Windows)
         if: ${{ matrix.os != 'windows-latest' }}
         shell: bash
@@ -407,6 +522,8 @@ jobs:
           zip -j "${SERVER_ZIP}" "${SERVER_EXE_NAME}" "${SERVER_TOML}" || true
           tar -czf "${SERVER_TAR}" "${SERVER_EXE_NAME}" "${SERVER_TOML}" || true
 
+          sha256sum "${CLIENT_ZIP}" "${CLIENT_TAR}" "${SERVER_ZIP}" "${SERVER_TAR}" > SHA256SUMS.txt
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -414,6 +531,7 @@ jobs:
           path: |
             dist/*.zip
             dist/*.tar.gz
+            dist/SHA256SUMS.txt
 
   release:
     name: Create Release and attach artifacts
@@ -525,6 +643,7 @@ jobs:
           files: |
             release_assets/**/*.zip
             release_assets/**/*.tar.gz
+            release_assets/**/SHA256SUMS.txt
           tag_name: ${{ needs.preflight.outputs.release_tag }}
           name: Release ${{ needs.preflight.outputs.release_tag }}
           body: ${{ fromJson(steps.create_release.outputs.result).body }}
