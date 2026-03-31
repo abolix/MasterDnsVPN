@@ -136,6 +136,9 @@ type Client struct {
 	localDNSCacheFlushTick time.Duration
 	localDNSCacheLoadOnce  sync.Once
 	localDNSCacheFlushOnce sync.Once
+
+	// SOCKS5 brute-force rate limiter
+	socksRateLimit *socksRateLimiter
 }
 
 // clientStreamTXPacket represents a queued packet pending transmission or retransmission.
@@ -261,6 +264,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		localDNSCacheFlushTick: time.Duration(cfg.LocalDNSCacheFlushSec) * time.Second,
 		orphanQueue:            mlq.New[VpnProto.Packet](cfg.OrphanQueueInitialCapacity),
 		sessionResetSignal:     make(chan struct{}, 1),
+		socksRateLimit:         newSocksRateLimiter(),
 	}
 
 	if c.streamResolverFailoverResendThreshold < 1 {
