@@ -451,6 +451,18 @@ func TestARQ_New(t *testing.T) {
 	}
 }
 
+func TestARQ_DefaultBackpressureFloorRemainsConservative(t *testing.T) {
+	enqueuer := NewMockPacketEnqueuer()
+	a := NewARQ(1, 2, enqueuer, nil, 1000, &testLogger{t}, Config{})
+
+	if a.windowSize != 300 {
+		t.Fatalf("expected default window size floor 300, got %d", a.windowSize)
+	}
+	if a.limit != 240 {
+		t.Fatalf("expected default send-buffer limit 240, got %d", a.limit)
+	}
+}
+
 func TestARQ_SendData(t *testing.T) {
 	enqueuer := NewMockPacketEnqueuer()
 	cfg := Config{
@@ -1641,6 +1653,39 @@ func TestARQ_ClientIOReadDataWithEOFQueuesFinalChunkAndEntersResetPath(t *testin
 	t.Fatal("expected client EOF with final data to arm deferred CLOSE_READ")
 }
 
+func TestARQ_ClientAbortLikeReadErrorQueuesCloseReadInsteadOfRST(t *testing.T) {
+	enqueuer := NewMockPacketEnqueuer()
+	cfg := Config{
+		WindowSize:               100,
+		RTO:                      0.1,
+		MaxRTO:                   0.5,
+		EnableControlReliability: true,
+		IsClient:                 true,
+	}
+
+	conn := &errAfterDataConn{err: errors.New("read tcp 127.0.0.1:19951->127.0.0.1:9165: wsarecv: An established connection was aborted by the software in your host machine.")}
+	a := NewARQ(1, 1, enqueuer, conn, 1000, &testLogger{t}, cfg)
+	a.Start()
+	defer a.Close("test end", CloseOptions{Force: true})
+
+	select {
+	case p := <-enqueuer.Packets:
+		if p.packetType != Enums.PACKET_STREAM_CLOSE_READ {
+			t.Fatalf("expected abort-like local read error to queue CLOSE_READ, got %s", Enums.PacketTypeName(p.packetType))
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for CLOSE_READ after abort-like local read error")
+	}
+
+	select {
+	case p := <-enqueuer.Packets:
+		if p.packetType == Enums.PACKET_STREAM_RST {
+			t.Fatal("did not expect abort-like local read error to queue STREAM_RST")
+		}
+	default:
+	}
+}
+
 func TestARQ_IOReadDataWithErrorDefersRSTUntilDrain(t *testing.T) {
 	enqueuer := NewMockPacketEnqueuer()
 	cfg := Config{
@@ -2499,6 +2544,26 @@ func TestARQ_ControlRetransmitDoesNotAdvanceRetryOrRTOWhenEnqueueRejected(t *tes
 	}
 	if !info.LastSentAt.Equal(beforeLastSent) {
 		t.Fatalf("expected LastSentAt to stay at %v, got %v", beforeLastSent, info.LastSentAt)
+	}
+}
+
+func TestARQ_SendControlPacketTrackedWakeSignalsRetransmitLoop(t *testing.T) {
+	enqueuer := NewMockPacketEnqueuer()
+	a := NewARQ(1, 1, enqueuer, nil, 1000, &testLogger{t}, Config{
+		WindowSize:               100,
+		RTO:                      0.1,
+		MaxRTO:                   0.5,
+		EnableControlReliability: true,
+	})
+
+	if !a.SendControlPacketWithTTL(Enums.PACKET_STREAM_SYN, 7, 0, 0, nil, Enums.DefaultPacketPriority(Enums.PACKET_STREAM_SYN), true, nil, 0) {
+		t.Fatal("expected tracked control packet enqueue to succeed")
+	}
+
+	select {
+	case <-a.retransmitWake:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected tracked control packet enqueue to wake retransmit loop")
 	}
 }
 

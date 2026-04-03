@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -271,6 +272,21 @@ func classifyIOError(err error) ioErrorClass {
 	return ioErrorFatal
 }
 
+func isAbortLikeLocalConnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "an established connection was aborted by the software in your host machine") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "forcibly closed by the remote host") ||
+		strings.Contains(msg, "broken pipe")
+}
+
 // Config represents the extensive ARQ tuning configuration identically ported from Python
 type Config struct {
 	WindowSize                  int
@@ -330,9 +346,9 @@ func NewARQ(streamID uint16, sessionID uint8, enqueuer PacketEnqueuer, localConn
 		logger = &DummyLogger{}
 	}
 
-	windowSize := max(cfg.WindowSize, 16)
+	windowSize := max(cfg.WindowSize, 300)
 
-	limit := max(int(float64(windowSize)*0.8), 8)
+	limit := max(int(float64(windowSize)*0.8), 50)
 
 	a := &ARQ{
 		streamID:  streamID,
@@ -350,8 +366,8 @@ func NewARQ(streamID uint16, sessionID uint8, enqueuer PacketEnqueuer, localConn
 		state:        StateOpen,
 		lastActivity: time.Now(),
 
-		windowSize:    windowSize,
-		limit:         limit,
+		windowSize:     windowSize,
+		limit:          limit,
 		windowNotFull:  make(chan struct{}, 1),
 		writeLock:      sync.Mutex{},
 		flushSignal:    make(chan struct{}, 1),
@@ -1057,11 +1073,17 @@ func (a *ARQ) ioLoop() {
 					alreadyHandled = true
 					break
 				}
-				errorReason = "Local connection closed"
-				resetRequired = true
-				resetAfterDrain = n > 0
+				errorReason = "Local App Closed Connection"
+				a.noteClientEOF(time.Now())
+				gracefulEOF = true
 			default:
 				transientReadSince = time.Time{}
+				if isAbortLikeLocalConnError(err) {
+					errorReason = "Local App Closed Connection (aborted): " + err.Error()
+					a.noteClientEOF(time.Now())
+					gracefulEOF = true
+					break
+				}
 				errorReason = "Read Error: " + err.Error()
 				resetRequired = true
 				resetAfterDrain = n > 0
@@ -1917,10 +1939,11 @@ func (a *ARQ) SendControlPacketWithTTL(packetType uint8, sequenceNum uint16, fra
 
 	key := uint32(packetType)<<24 | uint32(sequenceNum)<<8 | uint32(fragmentID)
 	now := time.Now()
+	shouldWake := false
 
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if _, exists := a.controlSndBuf[key]; exists {
+		a.mu.Unlock()
 		return true
 	}
 
@@ -1956,6 +1979,12 @@ func (a *ARQ) SendControlPacketWithTTL(packetType uint8, sequenceNum uint16, fra
 		CurrentRTO:     initialRTO,
 		SampleEligible: true,
 		TTL:            ttl,
+	}
+	shouldWake = true
+	a.mu.Unlock()
+
+	if shouldWake {
+		a.signalRetransmitWake()
 	}
 
 	return ok
@@ -2452,6 +2481,7 @@ func (a *ARQ) finalizeClose(reason string) {
 	rstSent := a.rstSent
 	rstReceived := a.rstReceived
 	rstAcked := a.rstAcked
+	priorReason := a.closeReason
 	localWritePending := a.localWritePending
 	localWriteClosed := a.localWriteClosed
 	localWriterBroken := a.localWriterBroken
@@ -2487,10 +2517,11 @@ func (a *ARQ) finalizeClose(reason string) {
 	a.mu.Unlock()
 
 	a.logger.Debugf(
-		"ARQ Stream Closed | Session: %d | Stream: %d | Reason: %s | PrevState: %d | SndBuf: %d | RcvBuf: %d | PendingInbound: %d | LocalWrite: pending=%t closed=%t broken=%t | CloseRead: %t/%t/%t | CloseWrite: %t/%t/%t | WaitingAck: %t/%s | Deferred: %t/%s | RST: %t/%t/%t",
+		"ARQ Stream Closed | Session: %d | Stream: %d | Reason: %s | PriorReason: %s | PrevState: %d | SndBuf: %d | RcvBuf: %d | PendingInbound: %d | LocalWrite: pending=%t closed=%t broken=%t | CloseRead: %t/%t/%t | CloseWrite: %t/%t/%t | WaitingAck: %t/%s | Deferred: %t/%s | RST: %t/%t/%t",
 		a.sessionID,
 		a.streamID,
 		reason,
+		priorReason,
 		prevState,
 		sndBufLen,
 		rcvBufLen,
