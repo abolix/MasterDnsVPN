@@ -1297,15 +1297,13 @@ func (a *ARQ) retransmitLoop() {
 
 // ReceiveData handles inbound STREAM_DATA and emit STREAM_DATA_ACK.
 func (a *ARQ) ReceiveData(sn uint16, data []byte) bool {
-	a.mu.RLock()
+	a.mu.Lock()
 	if a.closed || a.rstReceived || a.rstSent {
-		a.mu.RUnlock()
+		a.mu.Unlock()
 		return false
 	}
 
 	if a.localWriterBroken {
-		a.mu.RUnlock()
-		a.mu.Lock()
 		needCloseWrite := a.localWriterBroken &&
 			!a.closeWriteSent &&
 			!(a.waitingAck && a.waitingAckFor == Enums.PACKET_STREAM_CLOSE_WRITE) &&
@@ -1319,12 +1317,10 @@ func (a *ARQ) ReceiveData(sn uint16, data []byte) bool {
 		return false
 	}
 
-	a.mu.RUnlock()
-
-	safeData := append([]byte(nil), data...)
-	a.mu.Lock()
 	a.pendingInbound++
 	a.mu.Unlock()
+
+	safeData := append([]byte(nil), data...)
 
 	select {
 	case a.rxChan <- rxPayload{sn: sn, data: safeData}:
@@ -1417,6 +1413,8 @@ func (a *ARQ) processReceivedData(sn uint16, data []byte) {
 func (a *ARQ) writeLoop() {
 	defer a.wg.Done()
 
+	var mergeBuf []byte // reusable merge buffer across iterations
+
 	for {
 		// Check rcvBuf before blocking — signals may have been coalesced
 		// while we were writing, so data can be ready without a new signal.
@@ -1484,12 +1482,16 @@ func (a *ARQ) writeLoop() {
 				for _, chunk := range toWrite {
 					totalSize += len(chunk)
 				}
-				merged := make([]byte, 0, totalSize)
+				if cap(mergeBuf) >= totalSize {
+					mergeBuf = mergeBuf[:0]
+				} else {
+					mergeBuf = make([]byte, 0, totalSize)
+				}
 				for _, chunk := range toWrite {
-					merged = append(merged, chunk...)
+					mergeBuf = append(mergeBuf, chunk...)
 				}
 				toWrite = toWrite[:1]
-				toWrite[0] = merged
+				toWrite[0] = mergeBuf
 			}
 
 			shouldExit := false
