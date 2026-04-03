@@ -75,17 +75,22 @@ func (c *Client) selectTargetConnectionsForPacket(packetType uint8, streamID uin
 
 	selected := make([]Connection, 0, targetCount)
 	selected = append(selected, preferred)
-	seenKeys := map[string]struct{}{preferred.Key: {}}
 
 	for _, connection := range c.balancer.GetUniqueConnections(targetCount) {
 		if !connection.IsValid || connection.Key == "" {
 			continue
 		}
-		if _, exists := seenKeys[connection.Key]; exists {
+		dup := false
+		for _, s := range selected {
+			if s.Key == connection.Key {
+				dup = true
+				break
+			}
+		}
+		if dup {
 			continue
 		}
 		selected = append(selected, connection)
-		seenKeys[connection.Key] = struct{}{}
 		if len(selected) >= targetCount {
 			return selected, nil
 		}
