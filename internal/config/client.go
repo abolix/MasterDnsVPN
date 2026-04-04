@@ -385,7 +385,7 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.TunnelProcessWorkers = clampInt(defaultIntBelow(cfg.TunnelProcessWorkers, 1, 4), 1, 64)
 	cfg.TunnelPacketTimeoutSec = clampFloat(defaultFloatAtMostZero(cfg.TunnelPacketTimeoutSec, 8.0), 0.5, 120.0)
 	cfg.DispatcherIdlePollIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.DispatcherIdlePollIntervalSeconds, 0.020), 0.001, 1.0)
-	cfg.PingAggressiveIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingAggressiveIntervalSeconds, 0.100), 0.1, 30.0)
+	cfg.PingAggressiveIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingAggressiveIntervalSeconds, 0.100), 0.025, 30.0)
 	cfg.PingLazyIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingLazyIntervalSeconds, 1.0), cfg.PingAggressiveIntervalSeconds, 60.0)
 	cfg.PingCooldownIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingCooldownIntervalSeconds, 3.0), cfg.PingLazyIntervalSeconds, 300.0)
 	cfg.PingColdIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingColdIntervalSeconds, 30.0), cfg.PingCooldownIntervalSeconds, 3600.0)
