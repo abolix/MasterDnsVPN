@@ -28,7 +28,6 @@ func (c *Client) selectTargetConnections(packetType uint8, streamID uint16) []Co
 // asyncStreamDispatcher cycles through all active streams using a fair Round-Robin algorithm
 // and transmits the highest priority packets to the TX workers, packing control blocks when possible.
 func (c *Client) asyncStreamDispatcher(ctx context.Context) {
-	c.log.Debugf("Stream Dispatcher started")
 	defer c.asyncWG.Done()
 
 	var rrCursor int32 = -1
@@ -85,6 +84,37 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 
 dispatchLoop:
 	for {
+		// Global pending-aware throttle: when resolvers are saturated,
+		// slow ALL outbound queries (not just pings) to prevent SERVFAIL cascade.
+		{
+			validCount := 0
+			for i := range c.connections {
+				if c.connections[i].IsValid {
+					validCount++
+				}
+			}
+			if validCount > 0 {
+				c.resolverStatsMu.RLock()
+				pendingCount := len(c.resolverPending)
+				c.resolverStatsMu.RUnlock()
+				if float64(pendingCount)/float64(validCount) > 8.5 {
+					select {
+					case <-ctx.Done():
+						return
+					case <-idleTimer.C:
+					}
+					if !idleTimer.Stop() {
+						select {
+						case <-idleTimer.C:
+						default:
+						}
+					}
+					idleTimer.Reset(idlePoll)
+					continue dispatchLoop
+				}
+			}
+		}
+
 		currentVersion := c.streamSetVersion.Load()
 		if currentVersion != cachedVersion || cachedIDs == nil || cachedStreams == nil {
 			c.streamsMu.RLock()
