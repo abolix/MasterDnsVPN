@@ -92,8 +92,8 @@ func (p *PingManager) NotifyPacket(packetType uint8, isInbound bool) {
 }
 
 func (p *PingManager) wake(now int64) {
-	// Throttle wakeups to at most once per 100ms to reduce CPU overhead in high traffic
-	if now-p.lastWokeAt.Load() < int64(100*time.Millisecond) {
+	// Throttle wakeups to at most once per 25ms to reduce CPU overhead in high traffic
+	if now-p.lastWokeAt.Load() < int64(25*time.Millisecond) {
 		return
 	}
 	p.lastWokeAt.Store(now)
@@ -155,14 +155,17 @@ func (p *PingManager) pingLoop() {
 
 		if nowNano-lastPing >= int64(interval) {
 			if p.client.SessionReady() {
-				payload, err := buildClientPingPayload()
-				if err == nil {
-					// Use Stream 0 for pings
-					p.client.streamsMu.RLock()
-					s0 := p.client.active_streams[0]
-					p.client.streamsMu.RUnlock()
+				p.client.streamsMu.RLock()
+				s0 := p.client.active_streams[0]
+				p.client.streamsMu.RUnlock()
 
-					if s0 != nil {
+				if s0 != nil {
+					burst := p.burstCount(interval)
+					for i := 0; i < burst; i++ {
+						payload, err := buildClientPingPayload()
+						if err != nil {
+							break
+						}
 						s0.PushTXPacket(
 							Enums.DefaultPacketPriority(Enums.PACKET_PING),
 							Enums.PACKET_PING,
@@ -179,8 +182,8 @@ func (p *PingManager) pingLoop() {
 		}
 
 		checkInterval := interval / 2
-		if checkInterval < 100*time.Millisecond {
-			checkInterval = 100 * time.Millisecond
+		if checkInterval < 25*time.Millisecond {
+			checkInterval = 25 * time.Millisecond
 		}
 		if checkInterval > 1*time.Second {
 			checkInterval = 1 * time.Second
@@ -194,6 +197,55 @@ func (p *PingManager) pingLoop() {
 		}
 		timer.Reset(checkInterval)
 	}
+}
+
+// burstCount returns how many pings to send per interval.
+// In aggressive mode, send a small burst to spread queries across more resolvers,
+// increasing the number of in-flight DNS queries and thus download throughput.
+// Capped at 4 to exploit more resolvers — with dup=2 each ping becomes 2 UDP sends.
+//
+// Pending-aware throttle:
+//   - >8.5 pending/resolver: skip pings (ACK/data flow provides sufficient polling)
+//   - >5.5 pending/resolver: single ping only
+//   - otherwise: computed burst (max 4)
+func (p *PingManager) burstCount(currentInterval time.Duration) int {
+	if currentInterval > p.client.cfg.PingAggressiveInterval() {
+		return 1
+	}
+
+	validCount := 0
+	for i := range p.client.connections {
+		if p.client.connections[i].IsValid {
+			validCount++
+		}
+	}
+	if validCount > 0 {
+		p.client.resolverStatsMu.RLock()
+		pendingCount := len(p.client.resolverPending)
+		p.client.resolverStatsMu.RUnlock()
+
+		pendingPerResolver := float64(pendingCount) / float64(validCount)
+		if pendingPerResolver > 8.5 {
+			return 0
+		}
+		if pendingPerResolver > 5.5 {
+			return 1
+		}
+	}
+
+	connCount := len(p.client.connections)
+	dup := p.client.cfg.PacketDuplicationCount
+	if dup < 1 {
+		dup = 1
+	}
+	burst := connCount / (dup * 4)
+	if burst < 1 {
+		burst = 1
+	}
+	if burst > 4 {
+		burst = 4
+	}
+	return burst
 }
 
 func (p *PingManager) nextPingSequence() uint16 {
