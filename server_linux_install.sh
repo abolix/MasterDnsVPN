@@ -445,8 +445,6 @@ cat > /etc/sysctl.d/99-masterdnsvpn.conf <<'EOF'
 # MasterDnsVPN high-load tuning
 fs.file-max = 2097152
 fs.nr_open = 2097152
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
 net.core.somaxconn = 65535
 net.core.netdev_max_backlog = 16384
 net.core.optmem_max = 25165824
