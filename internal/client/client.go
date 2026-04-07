@@ -44,8 +44,6 @@ type Client struct {
 	resolverConns       map[string]chan pooledUDPConn
 	resolverAddrMu      sync.RWMutex
 	resolverAddrCache   map[string]*net.UDPAddr
-	resolverStatsMu     sync.RWMutex
-	resolverPending     map[resolverSampleKey]resolverSample
 	nowFn               func() time.Time
 	recheckConnectionFn func(conn *Connection) bool
 
@@ -178,25 +176,6 @@ type writerTask struct {
 	frames    []encodedOutboundDatagram
 }
 
-type resolverSampleKey struct {
-	resolverAddr string
-	localAddr    string
-	dnsID        uint16
-}
-
-type resolverSample struct {
-	serverKey  string
-	sentAt     time.Time
-	timedOut   bool
-	timedOutAt time.Time
-	evictAfter time.Time
-}
-
-type resolverTimeoutObservation struct {
-	serverKey string
-	at        time.Time
-}
-
 // Bootstrap initializes a new Client by loading configuration, setting up logging,
 // and preparing the connection map.
 func Bootstrap(configPath string, logPath string, overrides config.ClientConfigOverrides) (*Client, error) {
@@ -250,7 +229,6 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		},
 		resolverConns:                         make(map[string]chan pooledUDPConn),
 		resolverAddrCache:                     make(map[string]*net.UDPAddr),
-		resolverPending:                       make(map[resolverSampleKey]resolverSample),
 		mtuTestRetries:                        cfg.MTUTestRetries,
 		mtuTestTimeout:                        time.Duration(cfg.MTUTestTimeout * float64(time.Second)),
 		mtuSaveToFile:                         cfg.SaveMTUServersToFile,

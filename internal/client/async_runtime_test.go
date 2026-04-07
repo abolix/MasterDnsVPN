@@ -207,9 +207,9 @@ func TestApplyPlannerNoConnectionPolicyRequeuesDataTask(t *testing.T) {
 		txQueue:  mlq.New[*clientStreamTXPacket](8),
 	}
 	item := &clientStreamTXPacket{
-		PacketType: Enums.PACKET_STREAM_DATA,
+		PacketType:  Enums.PACKET_STREAM_DATA,
 		SequenceNum: 7,
-		Payload:    []byte("data"),
+		Payload:     []byte("data"),
 	}
 
 	c.applyPlannerNoConnectionPolicy(plannerTask{

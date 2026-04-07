@@ -10,6 +10,9 @@
 package client
 
 import (
+	"encoding/binary"
+	"net"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -48,6 +51,25 @@ type balancerStreamRouteState struct {
 	LastFailoverAt       time.Time
 }
 
+type balancerResolverSampleKey struct {
+	resolverAddr string
+	localAddr    string
+	dnsID        uint16
+}
+
+type balancerResolverSample struct {
+	serverKey  string
+	sentAt     time.Time
+	timedOut   bool
+	timedOutAt time.Time
+	evictAfter time.Time
+}
+
+type balancerTimeoutObservation struct {
+	serverKey string
+	at        time.Time
+}
+
 type Balancer struct {
 	strategy        int
 	rrCounter       atomic.Uint64
@@ -62,6 +84,7 @@ type Balancer struct {
 	inactiveIDs  []int
 	stats        []*connectionStats
 	streamRoutes map[uint16]*balancerStreamRouteState
+	pending      map[balancerResolverSampleKey]balancerResolverSample
 
 	streamFailoverThreshold int
 	streamFailoverCooldown  time.Duration
@@ -81,6 +104,7 @@ func NewBalancer(strategy int) *Balancer {
 	b := &Balancer{
 		strategy:                strategy,
 		streamRoutes:            make(map[uint16]*balancerStreamRouteState),
+		pending:                 make(map[balancerResolverSampleKey]balancerResolverSample),
 		streamFailoverThreshold: 1,
 		streamFailoverCooldown:  time.Second,
 	}
@@ -351,6 +375,141 @@ func (b *Balancer) RetractTimeoutWindow(serverKey string, now time.Time, window 
 		conn.WindowTimedOut--
 	}
 	return true
+}
+
+func (b *Balancer) TrackResolverSend(
+	packet []byte,
+	resolverAddr string,
+	localAddr string,
+	serverKey string,
+	sentAt time.Time,
+	tunnelPacketTimeout time.Duration,
+	checkInterval time.Duration,
+	window time.Duration,
+) {
+	if b == nil || len(packet) < 2 || resolverAddr == "" || serverKey == "" {
+		return
+	}
+
+	key := balancerResolverSampleKey{
+		resolverAddr: resolverAddr,
+		localAddr:    localAddr,
+		dnsID:        binary.BigEndian.Uint16(packet[:2]),
+	}
+
+	requestTimeout := resolverRequestTimeout(tunnelPacketTimeout, checkInterval, window)
+	ttl := resolverSampleTTL(tunnelPacketTimeout)
+	var timeoutObservations []balancerTimeoutObservation
+
+	b.mu.Lock()
+	if len(b.pending) >= resolverPendingSoftCap {
+		timeoutObservations = b.prunePendingLocked(sentAt, requestTimeout, ttl)
+		if overflow := len(b.pending) - resolverPendingHardCap; overflow >= 0 {
+			b.evictPendingLocked(overflow + 1)
+		}
+	}
+	b.pending[key] = balancerResolverSample{
+		serverKey: serverKey,
+		sentAt:    sentAt,
+	}
+	b.mu.Unlock()
+
+	for _, observation := range timeoutObservations {
+		b.ReportTimeoutWindow(observation.serverKey, observation.at, window, 1, 1)
+	}
+
+	b.ReportSend(serverKey)
+	b.ReportSendWindow(serverKey, sentAt, window)
+}
+
+func (b *Balancer) TrackResolverSuccess(
+	packet []byte,
+	addr *net.UDPAddr,
+	localAddr string,
+	receivedAt time.Time,
+	window time.Duration,
+	rtt time.Duration,
+) {
+	if b == nil || len(packet) < 2 || addr == nil {
+		return
+	}
+
+	key := balancerResolverSampleKey{
+		resolverAddr: addr.String(),
+		localAddr:    localAddr,
+		dnsID:        binary.BigEndian.Uint16(packet[:2]),
+	}
+
+	b.mu.Lock()
+	sample, ok := b.pending[key]
+	if ok {
+		delete(b.pending, key)
+	}
+	b.mu.Unlock()
+
+	if !ok || sample.serverKey == "" {
+		return
+	}
+	if sample.timedOut && !sample.timedOutAt.IsZero() {
+		b.RetractTimeoutWindow(sample.serverKey, receivedAt, window)
+	}
+	b.ReportSuccessWindow(sample.serverKey, receivedAt, window, rtt)
+}
+
+func (b *Balancer) TrackResolverFailure(
+	packet []byte,
+	addr *net.UDPAddr,
+	localAddr string,
+	failedAt time.Time,
+	window time.Duration,
+	minObservations int,
+	autoDisable bool,
+) {
+	if b == nil || len(packet) < 2 || addr == nil {
+		return
+	}
+
+	key := balancerResolverSampleKey{
+		resolverAddr: addr.String(),
+		localAddr:    localAddr,
+		dnsID:        binary.BigEndian.Uint16(packet[:2]),
+	}
+
+	b.mu.Lock()
+	sample, ok := b.pending[key]
+	if ok {
+		delete(b.pending, key)
+	}
+	b.mu.Unlock()
+
+	if !ok || sample.serverKey == "" || sample.timedOut || !autoDisable {
+		return
+	}
+	b.ReportTimeoutWindow(sample.serverKey, failedAt, window, minObservations, 1)
+}
+
+func (b *Balancer) CollectExpiredResolverTimeouts(
+	now time.Time,
+	tunnelPacketTimeout time.Duration,
+	checkInterval time.Duration,
+	window time.Duration,
+	minObservations int,
+	autoDisable bool,
+) {
+	if b == nil || !autoDisable {
+		return
+	}
+
+	requestTimeout := resolverRequestTimeout(tunnelPacketTimeout, checkInterval, window)
+	ttl := resolverSampleTTL(tunnelPacketTimeout)
+
+	b.mu.Lock()
+	timeoutObservations := b.prunePendingLocked(now, requestTimeout, ttl)
+	b.mu.Unlock()
+
+	for _, observation := range timeoutObservations {
+		b.ReportTimeoutWindow(observation.serverKey, observation.at, window, minObservations, 1)
+	}
 }
 
 func (b *Balancer) ResetServerStats(serverKey string) {
@@ -820,6 +979,134 @@ func normalizeRequiredCount(validCount, requiredCount, defaultIfInvalid int) int
 		return validCount
 	}
 	return requiredCount
+}
+
+const (
+	resolverPendingSoftCap = 8192
+	resolverPendingHardCap = 12288
+)
+
+func resolverSampleTTL(tunnelPacketTimeout time.Duration) time.Duration {
+	ttl := tunnelPacketTimeout * 3
+	if ttl < 10*time.Second {
+		ttl = 10 * time.Second
+	}
+	if ttl > 45*time.Second {
+		ttl = 45 * time.Second
+	}
+	return ttl
+}
+
+func resolverRequestTimeout(tunnelPacketTimeout time.Duration, checkInterval time.Duration, window time.Duration) time.Duration {
+	timeout := tunnelPacketTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	if checkInterval > 0 && checkInterval < timeout {
+		timeout = checkInterval
+	}
+	if window > 0 && window < timeout {
+		timeout = window
+	}
+	if timeout < 500*time.Millisecond {
+		timeout = 500 * time.Millisecond
+	}
+	return timeout
+}
+
+func resolverLateResponseGrace(requestTimeout time.Duration, ttl time.Duration) time.Duration {
+	if requestTimeout <= 0 {
+		requestTimeout = 5 * time.Second
+	}
+	grace := requestTimeout * 3
+	if grace < time.Second {
+		grace = time.Second
+	}
+	if ttl > 0 && grace > ttl {
+		grace = ttl
+	}
+	return grace
+}
+
+func (b *Balancer) prunePendingLocked(now time.Time, requestTimeout time.Duration, ttl time.Duration) []balancerTimeoutObservation {
+	if b == nil || len(b.pending) == 0 {
+		return nil
+	}
+
+	timeoutBefore := now.Add(-requestTimeout)
+	absoluteCutoff := now.Add(-ttl)
+	lateGrace := resolverLateResponseGrace(requestTimeout, ttl)
+	var timeoutObservations []balancerTimeoutObservation
+
+	for key, sample := range b.pending {
+		if !sample.timedOut {
+			if !sample.sentAt.After(timeoutBefore) {
+				sample.timedOut = true
+				sample.timedOutAt = sample.sentAt.Add(requestTimeout)
+				if sample.timedOutAt.After(now) {
+					sample.timedOutAt = now
+				}
+				sample.evictAfter = sample.timedOutAt.Add(lateGrace)
+				b.pending[key] = sample
+				if sample.serverKey != "" {
+					timeoutObservations = append(timeoutObservations, balancerTimeoutObservation{
+						serverKey: sample.serverKey,
+						at:        sample.timedOutAt,
+					})
+				}
+			}
+			if sample.sentAt.Before(absoluteCutoff) {
+				delete(b.pending, key)
+			}
+			continue
+		}
+
+		if !sample.evictAfter.IsZero() && !sample.evictAfter.After(now) {
+			delete(b.pending, key)
+			continue
+		}
+		if sample.sentAt.Before(absoluteCutoff) {
+			delete(b.pending, key)
+		}
+	}
+
+	return timeoutObservations
+}
+
+func (b *Balancer) evictPendingLocked(evictCount int) {
+	if b == nil || evictCount <= 0 || len(b.pending) == 0 {
+		return
+	}
+
+	type pendingEntry struct {
+		key    balancerResolverSampleKey
+		sample balancerResolverSample
+	}
+
+	entries := make([]pendingEntry, 0, len(b.pending))
+	for key, sample := range b.pending {
+		entries = append(entries, pendingEntry{key: key, sample: sample})
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].sample.timedOut != entries[j].sample.timedOut {
+			return entries[i].sample.timedOut
+		}
+		if !entries[i].sample.sentAt.Equal(entries[j].sample.sentAt) {
+			return entries[i].sample.sentAt.Before(entries[j].sample.sentAt)
+		}
+		if entries[i].key.resolverAddr != entries[j].key.resolverAddr {
+			return entries[i].key.resolverAddr < entries[j].key.resolverAddr
+		}
+		return entries[i].key.dnsID < entries[j].key.dnsID
+	})
+
+	if evictCount > len(entries) {
+		evictCount = len(entries)
+	}
+	for i := 0; i < evictCount; i++ {
+		delete(b.pending, entries[i].key)
+	}
 }
 
 func (b *Balancer) getUniqueConnectionsLocked(requiredCount int) []Connection {

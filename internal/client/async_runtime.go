@@ -784,7 +784,16 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 					continue
 				}
 				if _, err := conn.WriteToUDP(frame.packet, frame.addr); err == nil {
-					c.trackResolverSend(frame.packet, frame.addr.String(), localAddr, frame.serverKey, now)
+					c.balancer.TrackResolverSend(
+						frame.packet,
+						frame.addr.String(),
+						localAddr,
+						frame.serverKey,
+						now,
+						c.tunnelPacketTimeout,
+						c.autoDisableCheckInterval(),
+						c.autoDisableTimeoutWindow(),
+					)
 				}
 			}
 			if !task.wasPacked && task.selected != nil {
@@ -871,9 +880,24 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr, localAddr s
 		if errors.Is(err, DnsParser.ErrTXTAnswerMissing) {
 			receivedAt := time.Now()
 			if parsed, parseErr := DnsParser.ParsePacketLite(data); parseErr == nil && parsed.Header.RCode != 0 {
-				c.trackResolverFailure(data, addr, localAddr, receivedAt)
+				c.balancer.TrackResolverFailure(
+					data,
+					addr,
+					localAddr,
+					receivedAt,
+					c.autoDisableTimeoutWindow(),
+					c.autoDisableMinObservations(),
+					c.cfg.AutoDisableTimeoutServers,
+				)
 			} else {
-				c.trackResolverSuccess(data, addr, localAddr, receivedAt)
+				c.balancer.TrackResolverSuccess(
+					data,
+					addr,
+					localAddr,
+					receivedAt,
+					c.autoDisableTimeoutWindow(),
+					0,
+				)
 			}
 			// summary := DnsParser.DescribeResponseWithoutTunnelPayload(data)
 			// c.log.Debugf("DNS response from %v had no tunnel TXT payload | %s", addr, summary)
@@ -883,7 +907,14 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr, localAddr s
 		return
 	}
 
-	c.trackResolverSuccess(data, addr, localAddr, time.Now())
+	c.balancer.TrackResolverSuccess(
+		data,
+		addr,
+		localAddr,
+		time.Now(),
+		c.autoDisableTimeoutWindow(),
+		0,
+	)
 	// if c.log != nil && c.log.Enabled(logger.LevelDebug) && vpnPacket.PacketType != Enums.PACKET_PONG {
 	// 	if vpnPacket.PacketType == Enums.PACKET_STREAM_DATA_ACK {
 	// 		c.log.Debugf("Client received ACK | Stream: %d | Seq: %d", vpnPacket.StreamID, vpnPacket.SequenceNum)
