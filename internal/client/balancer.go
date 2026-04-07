@@ -35,6 +35,9 @@ type Connection struct {
 	DownloadMTUBytes  int
 	MTUResolveTime    time.Duration
 	LastHealthCheckAt time.Time
+	WindowStartedAt   time.Time
+	WindowSent        uint32
+	WindowTimedOut    uint32
 }
 
 type Balancer struct {
@@ -90,6 +93,9 @@ func (b *Balancer) SetConnections(connections []*Connection) {
 		copied.DownloadMTUBytes = 0
 		copied.MTUResolveTime = 0
 		copied.LastHealthCheckAt = time.Time{}
+		copied.WindowStartedAt = time.Time{}
+		copied.WindowSent = 0
+		copied.WindowTimedOut = 0
 
 		idx := len(b.connections)
 		b.connections = append(b.connections, copied)
@@ -137,6 +143,9 @@ func (b *Balancer) SetConnectionValidity(key string, valid bool) bool {
 	}
 
 	b.connections[idx].IsValid = valid
+	if valid {
+		b.resetWindowLocked(&b.connections[idx])
+	}
 	b.rebuildStateIndicesLocked()
 	return true
 }
@@ -171,6 +180,9 @@ func (b *Balancer) ApplyMTUProbeResult(key string, uploadBytes int, uploadChars 
 	conn.DownloadMTUBytes = downloadBytes
 	conn.MTUResolveTime = resolveTime
 	conn.IsValid = active
+	if active {
+		b.resetWindowLocked(conn)
+	}
 	b.rebuildStateIndicesLocked()
 	return true
 }
@@ -202,6 +214,83 @@ func (b *Balancer) ReportSuccess(serverKey string, rtt time.Duration) {
 	}
 	stats.applyHalfLifeLocked()
 	stats.mu.Unlock()
+}
+
+func (b *Balancer) ReportSendWindow(serverKey string, now time.Time, window time.Duration) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	conn, ok := b.connectionByKeyLocked(serverKey)
+	if !ok || !conn.IsValid {
+		return false
+	}
+
+	b.ensureWindowLocked(conn, now, window)
+	conn.WindowSent++
+	return true
+}
+
+func (b *Balancer) ReportSuccessWindow(serverKey string, now time.Time, window time.Duration, rtt time.Duration) bool {
+	if rtt > 0 {
+		b.ReportSuccess(serverKey, rtt)
+	}
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	conn, ok := b.connectionByKeyLocked(serverKey)
+	return ok && conn.IsValid
+}
+
+func (b *Balancer) ReportTimeoutWindow(serverKey string, now time.Time, window time.Duration, minObservations int, minActive int) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	conn, ok := b.connectionByKeyLocked(serverKey)
+	if !ok || !conn.IsValid {
+		return false
+	}
+
+	b.ensureWindowLocked(conn, now, window)
+	conn.WindowTimedOut++
+
+	if minObservations < 1 {
+		minObservations = 1
+	}
+
+	if minActive < 0 {
+		minActive = 0
+	}
+
+	if int(conn.WindowSent) < minObservations {
+		return false
+	}
+
+	if conn.WindowTimedOut != conn.WindowSent {
+		return false
+	}
+
+	if len(b.activeIDs) <= minActive {
+		return false
+	}
+
+	conn.IsValid = false
+	b.resetWindowLocked(conn)
+	b.rebuildStateIndicesLocked()
+	return true
+}
+
+func (b *Balancer) ResetConnectionWindow(serverKey string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	conn, ok := b.connectionByKeyLocked(serverKey)
+	if !ok {
+		return false
+	}
+
+	b.resetWindowLocked(conn)
+	return true
 }
 
 func (b *Balancer) ResetServerStats(serverKey string) {
@@ -437,7 +526,49 @@ func (b *Balancer) statsForKey(serverKey string) *connectionStats {
 	if !ok || idx < 0 || idx >= len(b.stats) {
 		return nil
 	}
+
 	return b.stats[idx]
+}
+
+func (b *Balancer) connectionByKeyLocked(serverKey string) (*Connection, bool) {
+	idx, ok := b.indexByKey[serverKey]
+	if !ok || idx < 0 || idx >= len(b.connections) {
+		return nil, false
+	}
+
+	return &b.connections[idx], true
+}
+
+func (b *Balancer) ensureWindowLocked(conn *Connection, now time.Time, window time.Duration) {
+	if conn == nil {
+		return
+	}
+
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	if window <= 0 {
+		if conn.WindowStartedAt.IsZero() {
+			conn.WindowStartedAt = now
+		}
+		return
+	}
+
+	if conn.WindowStartedAt.IsZero() || now.Sub(conn.WindowStartedAt) >= window {
+		b.resetWindowLocked(conn)
+		conn.WindowStartedAt = now
+	}
+}
+
+func (b *Balancer) resetWindowLocked(conn *Connection) {
+	if conn == nil {
+		return
+	}
+
+	conn.WindowStartedAt = time.Time{}
+	conn.WindowSent = 0
+	conn.WindowTimedOut = 0
 }
 
 func normalizeRequiredCount(validCount, requiredCount, defaultIfInvalid int) int {
