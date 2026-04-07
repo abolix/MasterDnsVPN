@@ -466,11 +466,11 @@ func TestHandleInboundPacketTreatsServerFailureWithoutTXTAsResolverFailure(t *te
 	if len(c.balancer.pending) != 0 {
 		t.Fatalf("expected resolverPending to be cleared after SERVFAIL response, got=%d", len(c.balancer.pending))
 	}
-	conn, ok := c.balancer.GetConnectionByKey("a")
-	if !ok {
-		t.Fatal("expected resolver a to exist")
+	stats := c.balancer.statsForKey("a")
+	if stats == nil {
+		t.Fatal("expected stats for resolver a to exist")
 	}
-	if conn.WindowTimedOut != 1 {
-		t.Fatalf("expected one timeout-window failure after SERVFAIL response, got=%d", conn.WindowTimedOut)
+	if stats.windowLost.Load() != 1 {
+		t.Fatalf("expected one timeout-window failure after SERVFAIL response, got=%d", stats.windowLost.Load())
 	}
 }

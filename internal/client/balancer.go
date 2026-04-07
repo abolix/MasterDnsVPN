@@ -41,9 +41,6 @@ type Connection struct {
 	DownloadMTUBytes  int
 	MTUResolveTime    time.Duration
 	LastHealthCheckAt time.Time
-	WindowStartedAt   time.Time
-	WindowSent        uint32
-	WindowTimedOut    uint32
 }
 
 type balancerStreamRouteState struct {
@@ -101,11 +98,14 @@ type Balancer struct {
 }
 
 type connectionStats struct {
-	sent         atomic.Uint64
-	acked        atomic.Uint64
-	lost         atomic.Uint64
-	rttMicrosSum atomic.Uint64
-	rttCount     atomic.Uint64
+	sent            atomic.Uint64
+	acked           atomic.Uint64
+	lost            atomic.Uint64
+	rttMicrosSum    atomic.Uint64
+	rttCount        atomic.Uint64
+	windowStartedAt atomic.Int64 // UnixNano
+	windowSent      atomic.Uint32
+	windowLost      atomic.Uint32
 }
 
 const connectionStatsHalfLifeThreshold = 1000
@@ -190,10 +190,6 @@ func (b *Balancer) SetConnections(connections []*Connection) {
 		copied.DownloadMTUBytes = 0
 		copied.MTUResolveTime = 0
 		copied.LastHealthCheckAt = time.Time{}
-		copied.WindowStartedAt = time.Time{}
-		copied.WindowSent = 0
-		copied.WindowTimedOut = 0
-
 		idx := len(b.connections)
 		b.connections = append(b.connections, copied)
 		b.indexByKey[copied.Key] = idx
@@ -240,7 +236,9 @@ func (b *Balancer) SetConnectionValidity(key string, valid bool) bool {
 
 	b.connections[idx].IsValid = valid
 	if valid {
-		b.resetWindowLocked(&b.connections[idx])
+		if stats := b.stats[idx]; stats != nil {
+			stats.resetWindow()
+		}
 	} else {
 		b.clearPreferredResolverReferencesLocked(key)
 	}
@@ -287,7 +285,9 @@ func (b *Balancer) ApplyMTUProbeResult(key string, uploadBytes int, uploadChars 
 	wasValid := conn.IsValid
 	conn.IsValid = active
 	if active {
-		b.resetWindowLocked(conn)
+		if stats := b.stats[idx]; stats != nil {
+			stats.resetWindow()
+		}
 	} else {
 		b.clearPreferredResolverReferencesLocked(key)
 	}
@@ -324,9 +324,23 @@ func (b *Balancer) ReportSuccess(serverKey string, rtt time.Duration) {
 }
 
 func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Duration, minObservations int, minActive int) bool {
-	if stats := b.statsForKey(serverKey); stats != nil {
-		stats.lost.Add(1)
-		stats.applyHalfLife()
+	stats := b.statsForKey(serverKey)
+	if stats == nil {
+		return false
+	}
+	stats.lost.Add(1)
+	stats.applyHalfLife()
+
+	stats.ensureWindow(now, window)
+	totalTimedOut := stats.windowLost.Add(1)
+	totalSent := stats.windowSent.Load()
+
+	if minObservations < 1 {
+		minObservations = 1
+	}
+
+	if int(totalSent) < minObservations || totalTimedOut != totalSent {
+		return false
 	}
 
 	b.mu.Lock()
@@ -337,13 +351,6 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 		return false
 	}
 
-	b.ensureWindowLocked(conn, now, window)
-	conn.WindowTimedOut++
-
-	if minObservations < 1 {
-		minObservations = 1
-	}
-
 	if minActive < 0 {
 		minActive = 0
 	}
@@ -352,20 +359,12 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 		minActive = 2
 	}
 
-	if int(conn.WindowSent) < minObservations {
-		return false
-	}
-
-	if conn.WindowTimedOut != conn.WindowSent {
-		return false
-	}
-
 	if len(b.activeIDs) <= minActive {
 		return false
 	}
 
 	conn.IsValid = false
-	b.resetWindowLocked(conn)
+	stats.resetWindow()
 	b.clearPreferredResolverReferencesLocked(serverKey)
 
 	if idx, ok := b.indexByKey[serverKey]; ok {
@@ -381,24 +380,26 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 }
 
 func (b *Balancer) RetractTimeout(serverKey string, now time.Time, window time.Duration) bool {
-	if stats := b.statsForKey(serverKey); stats != nil {
-		current := stats.lost.Load()
-		if current > 0 {
-			stats.lost.Add(^uint64(0)) // Atomic decrement
-		}
-	}
-
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	conn, ok := b.connectionByKeyLocked(serverKey)
-	if !ok {
+	stats := b.statsForKey(serverKey)
+	if stats == nil {
 		return false
 	}
 
-	b.ensureWindowLocked(conn, now, window)
-	if conn.WindowTimedOut > 0 {
-		conn.WindowTimedOut--
+	current := stats.lost.Load()
+	if current > 0 {
+		stats.lost.Add(^uint64(0)) // Atomic decrement
+	}
+
+	stats.applyHalfLife()
+	stats.ensureWindow(now, window)
+	for {
+		currentLost := stats.windowLost.Load()
+		if currentLost == 0 {
+			break
+		}
+		if stats.windowLost.CompareAndSwap(currentLost, currentLost-1) {
+			break
+		}
 	}
 	return true
 }
@@ -451,12 +452,10 @@ func (b *Balancer) TrackResolverSend(
 	}
 
 	b.ReportSend(serverKey)
-	b.mu.Lock()
-	if conn, ok := b.connectionByKeyLocked(serverKey); ok && conn.IsValid {
-		b.ensureWindowLocked(conn, sentAt, window)
-		conn.WindowSent++
+	if stats := b.statsForKey(serverKey); stats != nil {
+		stats.ensureWindow(sentAt, window)
+		stats.windowSent.Add(1)
 	}
-	b.mu.Unlock()
 }
 
 func (b *Balancer) TrackResolverSuccess(
@@ -1056,8 +1055,8 @@ func (b *Balancer) connectionByKeyLocked(serverKey string) (*Connection, bool) {
 	return &b.connections[idx], true
 }
 
-func (b *Balancer) ensureWindowLocked(conn *Connection, now time.Time, window time.Duration) {
-	if conn == nil {
+func (s *connectionStats) ensureWindow(now time.Time, window time.Duration) {
+	if s == nil {
 		return
 	}
 
@@ -1066,26 +1065,28 @@ func (b *Balancer) ensureWindowLocked(conn *Connection, now time.Time, window ti
 	}
 
 	if window <= 0 {
-		if conn.WindowStartedAt.IsZero() {
-			conn.WindowStartedAt = now
-		}
+		s.windowStartedAt.CompareAndSwap(0, now.UnixNano())
 		return
 	}
 
-	if conn.WindowStartedAt.IsZero() || now.Sub(conn.WindowStartedAt) >= window {
-		b.resetWindowLocked(conn)
-		conn.WindowStartedAt = now
+	nowUnix := now.UnixNano()
+	startedAt := s.windowStartedAt.Load()
+
+	if startedAt == 0 || (nowUnix-startedAt) >= window.Nanoseconds() {
+		if s.windowStartedAt.CompareAndSwap(startedAt, nowUnix) {
+			s.windowSent.Store(0)
+			s.windowLost.Store(0)
+		}
 	}
 }
 
-func (b *Balancer) resetWindowLocked(conn *Connection) {
-	if conn == nil {
+func (s *connectionStats) resetWindow() {
+	if s == nil {
 		return
 	}
-
-	conn.WindowStartedAt = time.Time{}
-	conn.WindowSent = 0
-	conn.WindowTimedOut = 0
+	s.windowStartedAt.Store(0)
+	s.windowSent.Store(0)
+	s.windowLost.Store(0)
 }
 
 func normalizeRequiredCount(validCount, requiredCount, defaultIfInvalid int) int {
