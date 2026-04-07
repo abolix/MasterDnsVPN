@@ -24,23 +24,25 @@ const (
 )
 
 type Connection struct {
-	Domain           string
-	Resolver         string
-	ResolverPort     int
-	ResolverLabel    string
-	Key              string
-	IsValid          bool
-	UploadMTUBytes   int
-	UploadMTUChars   int
-	DownloadMTUBytes int
-	MTUResolveTime   time.Duration
+	Domain            string
+	Resolver          string
+	ResolverPort      int
+	ResolverLabel     string
+	Key               string
+	IsValid           bool
+	UploadMTUBytes    int
+	UploadMTUChars    int
+	DownloadMTUBytes  int
+	MTUResolveTime    time.Duration
+	LastHealthCheckAt time.Time
 }
 
 type Balancer struct {
-	strategy  int
-	rrCounter atomic.Uint64
-	rngState  atomic.Uint64
-	version   atomic.Uint64
+	strategy        int
+	rrCounter       atomic.Uint64
+	healthRRCounter atomic.Uint64
+	rngState        atomic.Uint64
+	version         atomic.Uint64
 
 	mu          sync.RWMutex
 	connections []Connection
@@ -87,6 +89,7 @@ func (b *Balancer) SetConnections(connections []*Connection) {
 		copied.UploadMTUChars = 0
 		copied.DownloadMTUBytes = 0
 		copied.MTUResolveTime = 0
+		copied.LastHealthCheckAt = time.Time{}
 
 		idx := len(b.connections)
 		b.connections = append(b.connections, copied)
@@ -397,6 +400,38 @@ func (b *Balancer) AllConnections() []Connection {
 	result := make([]Connection, len(b.connections))
 	copy(result, b.connections)
 	return result
+}
+
+func (b *Balancer) NextInactiveConnectionForHealthCheck(now time.Time, minInterval time.Duration) (Connection, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	n := len(b.inactiveIDs)
+	if n == 0 {
+		return Connection{}, false
+	}
+
+	if minInterval < 0 {
+		minInterval = 0
+	}
+
+	start := roundRobinStartIndex(b.healthRRCounter.Add(1)-1, n)
+	for i := 0; i < n; i++ {
+		idx := b.inactiveIDs[(start+i)%n]
+		if idx < 0 || idx >= len(b.connections) {
+			continue
+		}
+
+		conn := &b.connections[idx]
+		if !conn.LastHealthCheckAt.IsZero() && now.Sub(conn.LastHealthCheckAt) < minInterval {
+			continue
+		}
+
+		conn.LastHealthCheckAt = now
+		return *conn, true
+	}
+
+	return Connection{}, false
 }
 
 func (b *Balancer) GetAllValidConnections() []Connection {
