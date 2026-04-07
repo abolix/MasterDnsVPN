@@ -248,7 +248,7 @@ func (b *Balancer) SetConnectionValidity(key string, valid bool) bool {
 
 	if b.log != nil && valid {
 		conn := &b.connections[idx]
-		b.log.Infof("<green>DNS Resolver Reactivated: %s (%s) | %s | Total Active: %d</green>",
+		b.log.Infof("<green>\U0001F504 DNS Resolver Reactivated: <cyan>%s</cyan> <cyan>%s</cyan>) | <cyan>%s</cyan> | Total Active: <cyan>%s</cyan></green>",
 			conn.ResolverLabel, conn.Domain, conn.Resolver, len(b.activeIDs))
 	}
 
@@ -295,7 +295,7 @@ func (b *Balancer) ApplyMTUProbeResult(key string, uploadBytes int, uploadChars 
 		b.moveConnectionStateLocked(idx, active)
 
 		if b.log != nil && active {
-			b.log.Infof("<green>DNS Resolver Reactivated (Health Check): %s (%s) | %s | Total Active: %d</green>",
+			b.log.Infof("<green>\U0001F504 DNS Resolver Reactivated (Health Check): <cyan>%s</cyan> <cyan>%s</cyan>) | <cyan>%s</cyan> | Total Active: <cyan>%s</cyan></green>",
 				conn.ResolverLabel, conn.Domain, conn.Resolver, len(b.activeIDs))
 		}
 	}
@@ -373,7 +373,7 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 	}
 
 	if b.log != nil {
-		b.log.Warnf("<red>DNS Resolver disabled (100%% Loss): %s (%s) | %s | Remaining: %d</red>",
+		b.log.Warnf("<red>DNS Resolver disabled (100%% Loss): <cyan>%s</cyan> <cyan>%s</cyan>) | <cyan>%s</cyan> | Remaining: <cyan>%d</cyan></red>",
 			conn.ResolverLabel, conn.Domain, conn.Resolver, len(b.activeIDs))
 	}
 

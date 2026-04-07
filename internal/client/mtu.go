@@ -317,13 +317,6 @@ func (c *Client) reactivateResolverConnection(conn Connection) bool {
 
 	conn.IsValid = true
 
-	if c.log != nil {
-		c.log.Infof(
-			"\U0001F504 <green>DNS server <cyan>%s</cyan> re-activated after successful recheck.</green> <magenta>|</magenta> <green>Active Resolvers</green>: <cyan>%d</cyan>",
-			conn.ResolverLabel,
-			c.balancer.ActiveCount(),
-		)
-	}
 	c.appendMTUAddedServerLine(&conn)
 	return true
 }
