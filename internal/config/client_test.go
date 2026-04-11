@@ -108,7 +108,7 @@ func TestLoadClientConfigRejectsInvalidResolverBalancingStrategy(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`
 PROTOCOL_TYPE = "SOCKS5"
 DOMAINS = ["v.domain.com"]
-RESOLVER_BALANCING_STRATEGY = 8
+RESOLVER_BALANCING_STRATEGY = 9
 DATA_ENCRYPTION_METHOD = 1
 ENCRYPTION_KEY = "secret"
 `), 0o644); err != nil {

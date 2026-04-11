@@ -21,14 +21,15 @@ import (
 )
 
 const (
-	BalancingRoundRobinDefault  = 0
-	BalancingRandom             = 1
-	BalancingRoundRobin         = 2
-	BalancingLeastLoss          = 3
-	BalancingLowestLatency      = 4
-	BalancingHybridScore        = 5
-	BalancingLossThenLatency    = 6
-	BalancingLeastLossTopRandom = 7
+	BalancingRoundRobinDefault      = 0
+	BalancingRandom                 = 1
+	BalancingRoundRobin             = 2
+	BalancingLeastLoss              = 3
+	BalancingLowestLatency          = 4
+	BalancingHybridScore            = 5
+	BalancingLossThenLatency        = 6
+	BalancingLeastLossTopRandom     = 7
+	BalancingLeastLossTopRoundRobin = 8
 )
 
 type Connection struct {
@@ -718,11 +719,11 @@ func (b *Balancer) GetBestConnection() (Connection, bool) {
 		idx := b.activeIDs[b.nextRandom()%uint64(len(b.activeIDs))]
 		return b.connections[idx], true
 	default:
-		if pool, handled := b.strategyCandidatePoolLocked(""); handled {
+		if pool, pick, handled := b.strategyCandidatePoolLocked(""); handled {
 			if len(pool) == 0 {
 				return b.roundRobinBestConnectionLocked()
 			}
-			return b.pickRandomFromPoolLocked(pool)
+			return b.pickFromPoolLocked(pool, pick)
 		}
 		scorer, hasSignal := b.strategyScorerLocked()
 		if scorer == nil {
@@ -756,11 +757,11 @@ func (b *Balancer) GetBestConnectionExcluding(excludeKey string) (Connection, bo
 		}
 		return Connection{}, false
 	default:
-		if pool, handled := b.strategyCandidatePoolLocked(excludeKey); handled {
+		if pool, pick, handled := b.strategyCandidatePoolLocked(excludeKey); handled {
 			if len(pool) == 0 {
 				return b.roundRobinBestConnectionExcludingLocked(excludeKey)
 			}
-			return b.pickRandomFromPoolLocked(pool)
+			return b.pickFromPoolLocked(pool, pick)
 		}
 		scorer, hasSignal := b.strategyScorerLocked()
 		if scorer == nil {
@@ -1072,11 +1073,11 @@ func (b *Balancer) selectInitialPreferredConnectionLocked() (Connection, bool) {
 	case BalancingRandom, BalancingRoundRobin, BalancingRoundRobinDefault:
 		return b.selectTargetByStrategyLocked()
 	default:
-		if pool, handled := b.strategyCandidatePoolLocked(""); handled {
+		if pool, pick, handled := b.strategyCandidatePoolLocked(""); handled {
 			if len(pool) == 0 {
 				return b.selectTargetByStrategyLocked()
 			}
-			return b.pickRandomFromPoolLocked(pool)
+			return b.pickFromPoolLocked(pool, pick)
 		}
 		scorer, hasSignal := b.strategyScorerLocked()
 		if scorer == nil {
@@ -1097,7 +1098,7 @@ func (b *Balancer) selectInitialPreferredConnectionLocked() (Connection, bool) {
 			return b.selectTargetByStrategyLocked()
 		}
 
-		return b.pickRandomFromPoolLocked(pool)
+		return b.pickFromPoolLocked(pool, poolPickRandom)
 	}
 }
 
@@ -1510,11 +1511,11 @@ func (b *Balancer) getUniqueConnectionsLocked(requiredCount int) []Connection {
 	case BalancingRandom:
 		return b.selectRandomLocked(count)
 	default:
-		if pool, handled := b.strategyCandidatePoolLocked(""); handled {
+		if pool, pick, handled := b.strategyCandidatePoolLocked(""); handled {
 			if len(pool) == 0 {
 				return b.selectRoundRobinLocked(count)
 			}
-			return b.limitConnectionPoolLocked(pool, count)
+			return b.limitConnectionPoolLocked(pool, count, pick)
 		}
 		scorer, hasSignal := b.strategyScorerLocked()
 		if scorer == nil {
@@ -1549,11 +1550,11 @@ func (b *Balancer) getBestConnectionExcludingLocked(excludeKey string) (Connecti
 		}
 		return Connection{}, false
 	default:
-		if pool, handled := b.strategyCandidatePoolLocked(excludeKey); handled {
+		if pool, pick, handled := b.strategyCandidatePoolLocked(excludeKey); handled {
 			if len(pool) == 0 {
 				return b.roundRobinBestConnectionExcludingLocked(excludeKey)
 			}
-			return b.pickRandomFromPoolLocked(pool)
+			return b.pickFromPoolLocked(pool, pick)
 		}
 		scorer, hasSignal := b.strategyScorerLocked()
 		if scorer == nil {
@@ -1774,36 +1775,62 @@ func (b *Balancer) strategyScorerLocked() (func(int) uint64, bool) {
 	}
 }
 
-func (b *Balancer) strategyCandidatePoolLocked(excludeKey string) ([]Connection, bool) {
+type balancerPoolPick int
+
+const (
+	poolPickRandom balancerPoolPick = iota
+	poolPickRoundRobin
+)
+
+func (b *Balancer) strategyCandidatePoolLocked(excludeKey string) ([]Connection, balancerPoolPick, bool) {
 	switch b.strategy {
 	case BalancingLossThenLatency:
 		if !b.hasHybridSignalLocked() {
-			return nil, true
+			return nil, poolPickRandom, true
 		}
-		return b.lossThenLatencyCandidatesLocked(excludeKey), true
+		return b.lossThenLatencyCandidatesLocked(excludeKey), poolPickRandom, true
 	case BalancingLeastLossTopRandom:
 		if !b.hasLossSignalLocked() {
-			return nil, true
+			return nil, poolPickRandom, true
 		}
-		return b.leastLossTopRandomCandidatesLocked(excludeKey), true
+		return b.leastLossTopTierCandidatesLocked(excludeKey), poolPickRandom, true
+	case BalancingLeastLossTopRoundRobin:
+		if !b.hasLossSignalLocked() {
+			return nil, poolPickRoundRobin, true
+		}
+		return b.leastLossTopTierCandidatesLocked(excludeKey), poolPickRoundRobin, true
 	default:
-		return nil, false
+		return nil, poolPickRandom, false
 	}
 }
 
-func (b *Balancer) pickRandomFromPoolLocked(pool []Connection) (Connection, bool) {
+func (b *Balancer) pickFromPoolLocked(pool []Connection, pick balancerPoolPick) (Connection, bool) {
 	if len(pool) == 0 {
 		return Connection{}, false
 	}
-	return pool[b.nextRandom()%uint64(len(pool))], true
+	switch pick {
+	case poolPickRoundRobin:
+		pos := roundRobinStartIndex(b.rrCounter.Add(1)-1, len(pool))
+		return pool[pos], true
+	default:
+		return pool[b.nextRandom()%uint64(len(pool))], true
+	}
 }
 
-func (b *Balancer) limitConnectionPoolLocked(pool []Connection, count int) []Connection {
+func (b *Balancer) limitConnectionPoolLocked(pool []Connection, count int, pick balancerPoolPick) []Connection {
 	if len(pool) == 0 {
 		return nil
 	}
 	if count >= len(pool) {
 		return pool
+	}
+	if pick == poolPickRoundRobin {
+		start := roundRobinStartIndex(b.rrCounter.Add(uint64(count))-uint64(count), len(pool))
+		ordered := make([]Connection, len(pool))
+		for i := range pool {
+			ordered[i] = pool[(start+i)%len(pool)]
+		}
+		return ordered[:count]
 	}
 	return pool[:count]
 }
@@ -1819,10 +1846,9 @@ func (b *Balancer) lossThenLatencyCandidatesLocked(excludeKey string) []Connecti
 		return nil
 	}
 
-	ordered := b.rotatedActiveIndicesLocked(1)
-	candidates := make([]candidate, 0, len(ordered))
+	candidates := make([]candidate, 0, len(b.activeIDs))
 	bestLoss := ^uint64(0)
-	for _, idx := range ordered {
+	for _, idx := range b.activeIDs {
 		if excludeKey != "" && b.connections[idx].Key == excludeKey {
 			continue
 		}
@@ -1890,7 +1916,7 @@ func latencyToleranceForTier(bestLatency uint64) uint64 {
 	return tolerance
 }
 
-func (b *Balancer) leastLossTopRandomCandidatesLocked(excludeKey string) []Connection {
+func (b *Balancer) leastLossTopTierCandidatesLocked(excludeKey string) []Connection {
 	type candidate struct {
 		idx  int
 		loss uint64
@@ -1900,9 +1926,8 @@ func (b *Balancer) leastLossTopRandomCandidatesLocked(excludeKey string) []Conne
 		return nil
 	}
 
-	ordered := b.rotatedActiveIndicesLocked(1)
-	candidates := make([]candidate, 0, len(ordered))
-	for _, idx := range ordered {
+	candidates := make([]candidate, 0, len(b.activeIDs))
+	for _, idx := range b.activeIDs {
 		if excludeKey != "" && b.connections[idx].Key == excludeKey {
 			continue
 		}

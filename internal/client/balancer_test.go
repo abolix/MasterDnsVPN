@@ -297,6 +297,48 @@ func TestBalancerLeastLossTopRandomUsesTopLossTier(t *testing.T) {
 	}
 }
 
+func TestBalancerLeastLossTopRoundRobinUsesTopLossTier(t *testing.T) {
+	b := NewBalancer(BalancingLeastLossTopRoundRobin, nil)
+	connections := []*Connection{
+		{Key: "a", IsValid: true},
+		{Key: "b", IsValid: true},
+		{Key: "c", IsValid: true},
+		{Key: "d", IsValid: true},
+	}
+	b.SetConnections(connections)
+	for _, key := range []string{"a", "b", "c", "d"} {
+		_ = b.SetConnectionValidity(key, true)
+	}
+
+	for i := 0; i < 10; i++ {
+		for _, key := range []string{"a", "b", "c", "d"} {
+			b.ReportSend(key)
+			b.ReportSuccess(key, 5*time.Millisecond)
+		}
+	}
+	for i := 0; i < 1; i++ {
+		b.ReportSend("c")
+		b.ReportTimeout("c", time.Now(), 10*time.Second, 1)
+		b.ReportSend("d")
+		b.ReportTimeout("d", time.Now(), 10*time.Second, 1)
+	}
+
+	first, ok := b.GetBestConnection()
+	if !ok {
+		t.Fatal("expected best connection")
+	}
+	second, ok := b.GetBestConnection()
+	if !ok {
+		t.Fatal("expected best connection")
+	}
+	if (first.Key != "a" && first.Key != "b") || (second.Key != "a" && second.Key != "b") {
+		t.Fatalf("expected picks only from lower-loss top tier, got %q then %q", first.Key, second.Key)
+	}
+	if first.Key == second.Key {
+		t.Fatalf("expected round-robin across top loss tier, got %q then %q", first.Key, second.Key)
+	}
+}
+
 func TestBalancerStatsHalfLifeAlsoAppliesOnSend(t *testing.T) {
 	b := NewBalancer(BalancingLeastLoss, nil)
 	connections := []*Connection{
