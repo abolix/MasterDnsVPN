@@ -364,7 +364,7 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 		return false
 	}
 
-	minObservations := autoDisableMinObservationsForActiveCount(len(b.activeIDs))
+	minObservations := autoDisableMinObservationsForActiveCount(len(b.activeIDs), window)
 	if int(totalSent) < minObservations || totalTimedOut != totalSent {
 		return false
 	}
@@ -402,34 +402,34 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 	return true
 }
 
-func autoDisableMinObservationsForActiveCount(active int) int {
+func autoDisableMinObservationsForActiveCount(active int, window time.Duration) int {
 	switch {
 	case active <= 3:
 		return 1000000
 	case active <= 5:
-		return 48
+		return scaleAutoDisableMinObservations(48, window)
 	case active <= 8:
-		return 40
+		return scaleAutoDisableMinObservations(40, window)
 	case active <= 10:
-		return 34
+		return scaleAutoDisableMinObservations(34, window)
 	case active <= 15:
-		return 26
+		return scaleAutoDisableMinObservations(26, window)
 	case active <= 20:
-		return 22
+		return scaleAutoDisableMinObservations(22, window)
 	case active <= 30:
-		return 18
+		return scaleAutoDisableMinObservations(18, window)
 	case active <= 40:
-		return 15
+		return scaleAutoDisableMinObservations(15, window)
 	case active <= 50:
-		return 13
+		return scaleAutoDisableMinObservations(13, window)
 	case active <= 75:
-		return 10
+		return scaleAutoDisableMinObservations(10, window)
 	case active <= 100:
-		return 8
+		return scaleAutoDisableMinObservations(8, window)
 	case active <= 150:
-		return 7
+		return scaleAutoDisableMinObservations(7, window)
 	default:
-		return 6
+		return scaleAutoDisableMinObservations(6, window)
 	}
 }
 
@@ -441,8 +441,15 @@ func autoDisableCheckIntervalForActiveCount(active int, window time.Duration) ti
 	if interval < time.Second {
 		interval = time.Second
 	}
-	if interval > 5*time.Second {
-		interval = 5 * time.Second
+	maxInterval := 5 * time.Second
+	if window >= 60*time.Second {
+		maxInterval = 12 * time.Second
+	} else if window >= 30*time.Second {
+		maxInterval = 8 * time.Second
+	}
+
+	if interval > maxInterval {
+		interval = maxInterval
 	}
 
 	switch {
@@ -485,6 +492,20 @@ func autoDisableCheckIntervalForActiveCount(active int, window time.Duration) ti
 	}
 
 	return interval
+}
+
+func scaleAutoDisableMinObservations(base int, window time.Duration) int {
+	if base <= 0 {
+		return base
+	}
+	switch {
+	case window >= 60*time.Second:
+		return base * 3
+	case window >= 30*time.Second:
+		return base * 2
+	default:
+		return base
+	}
 }
 
 func (b *Balancer) RetractTimeout(serverKey string, now time.Time, window time.Duration) bool {
