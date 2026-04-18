@@ -808,6 +808,9 @@ You can review these related projects here:
 - [Persian Config Builder for MasterDnsVPN](https://github.com/datacoder-io/MasterDnsVPN-ConfigMaker) - [Web Config Builder](https://datacoder-io.github.io/MasterDnsVPN-ConfigMaker)
   A tool that helps create MasterDnsVPN configuration files with Persian explanations and a guided interface. This project is developed independently by datacoder-io.
 
+- [MasterDnsWeb (Web Management Client)](https://github.com/abolix/MasterDnsWeb)
+  A web-based management client for MasterDnsVPN, designed to make it easy to manage one or multiple instances at the same time. Developed independently by Abolix.
+
 ---
 
 ### Section 5.2: Fixing Port 53 Already in Use (Linux Server) 🛑
