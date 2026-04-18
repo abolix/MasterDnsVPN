@@ -793,6 +793,9 @@ MTU_TEST_TIMEOUT = 1.0
 - [ابزار ساخت کانفیگ فارسی برای MasterDnsVPN](https://github.com/datacoder-io/MasterDnsVPN-ConfigMaker) - [آدرس وب جهت ساخت کانفیگ](https://datacoder-io.github.io/MasterDnsVPN-ConfigMaker)
 > این ابزار به شما کمک می‌کند تا کانفیگ‌های MasterDnsVPN را به زبان فارسی و با توضیحات کامل بسازید. این پروژه توسط datacoder-io توسعه داده شده است و می‌توانید آن را در لینک بالا مشاهده کنید.
 
+- [MasterDnsWeb (کلاینت مدیریت تحت وب)](https://github.com/abolix/MasterDnsWeb)
+> یک پروژه تحت وب برای مدیریت آسان MasterDnsVPN و مدیریت هم‌زمان یک یا چندین Instance. این پروژه به‌صورت مستقل توسط Abolix توسعه داده شده است.
+
 ---
 
 ### بخش ۵.۲: رفع مشکل اشغال بودن پورت ۵۳ (در سرور لینوکس) 🛑
